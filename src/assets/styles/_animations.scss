@@ -1,0 +1,56 @@
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 8px var(--node-color); }
+  50% { box-shadow: 0 0 20px var(--node-color); }
+}
+
+@keyframes breatheGlow {
+  0%, 100% { filter: drop-shadow(0 0 4px var(--node-color)); }
+  50% { filter: drop-shadow(0 0 14px var(--node-color)); }
+}
+
+@keyframes nodeFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+// Surface leave
+.surface-leave-active {
+  transition: transform 400ms ease-out, opacity 400ms ease-out;
+}
+.surface-leave-to {
+  transform: translateY(-30%);
+  opacity: 0;
+}
+
+// Universe enter
+.universe-enter-active {
+  transition: opacity 600ms ease-out 100ms;
+}
+.universe-enter-from {
+  opacity: 0;
+}
+.universe-enter-to {
+  opacity: 1;
+}
+
+// Universe leave
+.universe-leave-active {
+  transition: opacity 400ms ease-out;
+}
+.universe-leave-to {
+  opacity: 0;
+}
+
+// Surface re-enter
+.surface-enter-active {
+  transition: transform 400ms ease-out, opacity 400ms ease-out;
+}
+.surface-enter-from {
+  transform: translateY(-30%);
+  opacity: 0;
+}

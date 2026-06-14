@@ -1,0 +1,67 @@
+// Colors
+$color-primary: #16A34A;
+$color-secondary: #15803D;
+$color-accent: #F1F8F3;
+$color-surface-bg: #F7F7F5;
+$color-surface-dark: #111111;
+$color-text: #18181B;
+$color-text-light: #71717A;
+$color-error: #E63946;
+$color-success: #10B981;
+$color-warning: #F59E0B;
+$color-info: #3B82F6;
+$color-border: #E4E4E7;
+
+// Universe
+$universe-bg: #0A0A0F;
+$universe-nebula-1: rgba(#1a0a2e, 0.15);
+$universe-nebula-2: rgba(#0a1a2e, 0.15);
+
+// Z-indexes
+$z-starfield: 0;
+$z-block-wall: 1;
+$z-force-graph: 2;
+$z-node-popup: 3;
+$z-surface: 10;
+$z-topnav: 100;
+
+// Breakpoints
+$bp-tablet: 768px;
+$bp-desktop: 1024px;
+
+// Transitions
+$transition-screen: 520ms cubic-bezier(0.22, 1, 0.36, 1);
+$transition-universe: 600ms ease-out;
+$transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+$transition-normal: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+$transition-bounce: 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
+
+// Surface design language
+$space-screen: 12px;
+$radius-panel: 12px;
+$radius-control: 8px;
+$radius-small: 6px;
+$shadow-panel: 0 8px 24px rgba(24, 24, 27, 0.05);
+$shadow-control: 0 1px 2px rgba(24, 24, 27, 0.05);
+
+// Nav
+$nav-height: 52px;
+$sidebar-width: 330px;
+$build-sidebar-width: $sidebar-width;
+$query-sidebar-width: $sidebar-width;
+
+// Font
+$font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+$font-mono: 'SF Mono', 'Fira Code', monospace;
+$font-size-xs: 11px;
+$font-size-sm: 12px;
+$font-size-base: 13px;
+$font-size-md: 14px;
+$font-size-lg: 18px;
+$font-size-title: 22px;
+$font-weight-regular: 400;
+$font-weight-medium: 500;
+$font-weight-semibold: 600;
+$line-height-tight: 1.25;
+$line-height-base: 1.5;
+$line-height-relaxed: 1.65;
