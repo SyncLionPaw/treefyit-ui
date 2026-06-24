@@ -6,7 +6,7 @@ import { useApiConfigStore } from './apiConfigStore'
 import { useTreeStore } from './treeStore'
 
 type ChatStreamEvent =
-  | { type: 'start'; bid?: string; filename?: string; model?: string; session_id?: string }
+  | { type: 'start'; bid?: string; tree_id?: string; filename?: string; session_id?: string }
   | { type: 'text' | 'reasoning'; text?: string }
   | { type: 'tool_call'; id?: string; name?: string; arguments?: unknown }
   | { type: 'tool_result'; id?: string; name?: string; ok?: boolean; content?: unknown }
@@ -17,7 +17,6 @@ type ChatStreamEvent =
 export interface ChatSessionSummary {
   id: string
   bid: string
-  model: string
   title: string
   turn_count: number
   created_at: string
@@ -25,13 +24,20 @@ export interface ChatSessionSummary {
 }
 
 interface ChatSessionTurn {
-  session_id: string
-  turn_idx: number
+  session_id?: string
+  turn_idx?: number
   role: 'user' | 'assistant'
   text?: string | null
+  content?: string | null
   tool_calls?: string | Array<{ id?: string; name?: string; arguments?: unknown }> | null
   tool_results?: string | Array<{ id?: string; name?: string; ok?: boolean; content?: unknown }> | null
   created_at: string
+}
+
+type BackendChatSessionSummary = Partial<ChatSessionSummary> & {
+  session_id?: string
+  tree_id?: string
+  turns?: unknown[]
 }
 
 function formatChatError(err: unknown, baseUrl: string) {
@@ -70,6 +76,27 @@ function parseJsonList<T>(value: unknown): T[] {
     return Array.isArray(parsed) ? parsed as T[] : []
   } catch {
     return []
+  }
+}
+
+function normalizeSession(session: BackendChatSessionSummary): ChatSessionSummary {
+  const id = session.id || session.session_id || ''
+  return {
+    id,
+    bid: session.bid || session.tree_id || '',
+    title: session.title || 'Untitled chat',
+    turn_count: session.turn_count || session.turns?.length || 0,
+    created_at: session.created_at || '',
+    updated_at: session.updated_at || session.created_at || '',
+  }
+}
+
+function normalizeTurn(turn: ChatSessionTurn, session: ChatSessionSummary, index: number): ChatSessionTurn {
+  return {
+    ...turn,
+    session_id: turn.session_id || session.id,
+    turn_idx: turn.turn_idx ?? index,
+    text: turn.text ?? turn.content ?? '',
   }
 }
 
@@ -144,7 +171,7 @@ export const useChatStore = defineStore('chat', () => {
   function applyChatEvent(messageId: string, event: ChatStreamEvent) {
     if (event.type === 'start') {
       if (event.session_id) currentSessionId.value = event.session_id
-      if (event.bid) currentSessionBid.value = event.bid
+      if (event.bid || event.tree_id) currentSessionBid.value = event.bid || event.tree_id || null
       updateMessage(messageId, message => {
         if (event.filename) message.sourceRef = event.filename
       })
@@ -298,17 +325,9 @@ export const useChatStore = defineStore('chat', () => {
 
     isSending.value = true
     try {
-      const payload = currentBuild?.id
-        ? {
-          bid: currentBuild.id,
-          question: text,
-          model: currentBuild.stats?.model || 'deepseek-chat',
-          ...(sessionId ? { session_id: sessionId } : {}),
-        }
-        : {
-          question: text,
-          model: 'deepseek-chat',
-        }
+      const payload: Record<string, string> = { question: text }
+      if (currentBuild?.id) payload.bid = currentBuild.id
+      if (sessionId) payload.session_id = sessionId
 
       const response = await fetch(resolveApiUrl(apiConfig, 'chatTree'), {
         method: 'POST',
@@ -338,9 +357,11 @@ export const useChatStore = defineStore('chat', () => {
 
   function turnToMessage(turn: ChatSessionTurn): ChatMessage {
     const role = turn.role === 'assistant' ? 'ai' : 'user'
-    const content = turn.text || ''
+    const content = turn.text || turn.content || ''
+    const sessionId = turn.session_id || 'session'
+    const turnIndex = turn.turn_idx ?? Date.now()
     const message: ChatMessage = {
-      id: `${turn.session_id}-${turn.turn_idx}`,
+      id: `${sessionId}-${turnIndex}`,
       role,
       content,
       timestamp: turn.created_at,
@@ -383,8 +404,8 @@ export const useChatStore = defineStore('chat', () => {
         limit: options.limit || 50,
       }))
       if (!response.ok) throw new Error(`Sessions request failed: ${response.status}`)
-      const data = await response.json() as { sessions?: ChatSessionSummary[] }
-      sessions.value = data.sessions || []
+      const data = await response.json() as { sessions?: BackendChatSessionSummary[] }
+      sessions.value = (data.sessions || []).map(normalizeSession).filter(session => session.id)
     } catch (err) {
       sessionsError.value = formatSessionError(err, '加载聊天记录', apiConfig.displayBaseUrl)
       sessions.value = []
@@ -403,7 +424,7 @@ export const useChatStore = defineStore('chat', () => {
       }))
       if (!response.ok) throw new Error(`Session turns request failed: ${response.status}`)
       const data = await response.json() as { turns?: ChatSessionTurn[] }
-      messages.value = (data.turns || []).map(turnToMessage)
+      messages.value = (data.turns || []).map((turn, index) => turnToMessage(normalizeTurn(turn, session, index)))
       selectedSessionId.value = session.id
       currentSessionId.value = session.id
       currentSessionBid.value = session.bid

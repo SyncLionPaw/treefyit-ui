@@ -19,11 +19,11 @@ import JsonRenderer from '../common/JsonRenderer.vue'
 
 type BuildTab = 'diagram' | 'detail' | 'preview' | 'json'
 type BuildGraphNode = FlatNode
+const buildLockedTabs = new Set<BuildTab>(['diagram', 'detail', 'json'])
 
 const tree = useTreeStore()
 const apiConfig = useApiConfigStore()
 const activeTab = ref<BuildTab>('diagram')
-const parseMode = ref<'auto' | 'semantic' | 'md'>('auto')
 const summarize = ref(true)
 const selectedFile = ref<File | null>(null)
 const showLabels = ref(true)
@@ -35,7 +35,6 @@ const previewObjectUrl = ref('')
 const expandedDetailNodeIds = ref<Set<string>>(new Set())
 const graphContainer = ref<HTMLDivElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
-const model = 'deepseek/deepseek-chat'
 let graph: G6Graph | null = null
 let graphLoading = false
 let resizeObserver: ResizeObserver | null = null
@@ -234,6 +233,15 @@ const tabs: Array<{ key: BuildTab; label: string; icon: unknown }> = [
   { key: 'json', label: 'JSON', icon: Braces },
 ]
 
+function isTabDisabled(tab: BuildTab) {
+  return tree.isBuilding && buildLockedTabs.has(tab)
+}
+
+function selectTab(tab: BuildTab) {
+  if (isTabDisabled(tab)) return
+  activeTab.value = tab
+}
+
 async function createGraph() {
   if (!graphContainer.value || graph || graphLoading) return
   graphLoading = true
@@ -389,9 +397,7 @@ function handleDrop(event: DragEvent) {
 async function buildSelectedFile() {
   if (!selectedFile.value || tree.isBuilding) return
   await tree.buildFromFile(selectedFile.value, {
-    mode: parseMode.value,
     summarize: summarize.value,
-    model,
   })
 }
 
@@ -402,6 +408,12 @@ watch(() => tree.currentBuild?.id, () => {
       .filter(node => node.depth <= 1 && hasDetailChildren(node.id))
       .map(node => node.id)
   )
+})
+
+watch(() => tree.isBuilding, (isBuilding) => {
+  if (isBuilding && isTabDisabled(activeTab.value)) {
+    activeTab.value = 'preview'
+  }
 })
 
 watch(selectedFile, file => {
@@ -460,25 +472,6 @@ onBeforeUnmount(() => {
           accept=".md,.pdf,.html,.htm,.zip"
           @change="handleFileChange"
         />
-
-        <section class="control-card mode-card">
-          <div class="control-label">Parsing mode</div>
-          <div class="segmented">
-            <button
-              v-for="mode in ['auto', 'semantic', 'md']"
-              :key="mode"
-              :class="{ active: parseMode === mode }"
-              @click="parseMode = mode as typeof parseMode"
-            >
-              {{ mode }}
-            </button>
-          </div>
-        </section>
-
-        <section class="control-card model-card">
-          <div class="control-label">Model</div>
-          <input :value="model" readonly />
-        </section>
 
         <label class="summary-toggle">
           <input v-model="summarize" type="checkbox" />
@@ -545,8 +538,10 @@ onBeforeUnmount(() => {
         <button
           v-for="tab in tabs"
           :key="tab.key"
-          :class="{ active: activeTab === tab.key }"
-          @click="activeTab = tab.key"
+          :class="{ active: activeTab === tab.key, disabled: isTabDisabled(tab.key) }"
+          :disabled="isTabDisabled(tab.key)"
+          :title="isTabDisabled(tab.key) ? 'Building in progress. Available after parsing completes.' : ''"
+          @click="selectTab(tab.key)"
         >
           <component :is="tab.icon" :size="13" :stroke-width="2" aria-hidden="true" />
           {{ tab.label }}
@@ -789,44 +784,6 @@ $bg: $color-surface-bg;
   letter-spacing: 0.08em;
   line-height: 1.25;
   text-transform: uppercase;
-}
-
-.segmented {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  padding: 3px;
-  border: 1px solid $border;
-  border-radius: $radius-control;
-  background: $bg;
-
-  button {
-    padding: 5px 2px;
-    border: none;
-    border-radius: $radius-small;
-    background: transparent;
-    color: $muted;
-    cursor: pointer;
-    font-size: $font-size-xs;
-    font-weight: $font-weight-semibold;
-
-    &.active {
-      background: #fff;
-      color: $text-dark;
-      box-shadow: $shadow-control;
-    }
-  }
-}
-
-.model-card input {
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid $border;
-  border-radius: $radius-control;
-  background: #fff;
-  color: $text-dark;
-  font-size: $font-size-xs;
-  outline: none;
-  text-overflow: ellipsis;
 }
 
 .summary-toggle {
@@ -1195,6 +1152,12 @@ $bg: $color-surface-bg;
       border-color: $plant;
       background: $plant-soft;
       color: $plant;
+    }
+
+    &:disabled,
+    &.disabled {
+      opacity: 0.42;
+      cursor: not-allowed;
     }
   }
 }

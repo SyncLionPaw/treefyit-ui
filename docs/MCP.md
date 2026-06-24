@@ -26,8 +26,9 @@ User experience:
 1. User installs TreefyIt Skill or TreefyIt MCP.
 2. User gives the agent a file or asks it to use an existing knowledge tree.
 3. Agent calls build_knowledge(file) if needed.
-4. Agent calls overview(tree_id), inspect(tree_id, node_id), and children(tree_id, node_id) to retrieve only relevant parts.
-5. Agent answers with grounded, inspectable context from the document tree.
+4. Agent calls overview_forest() or search_trees(query) when it needs to choose a knowledge base.
+5. Agent calls overview(tree_id), inspect(tree_id, node_id), and children(tree_id, node_id) to retrieve only relevant parts.
+6. Agent answers with grounded, inspectable context from the document tree.
 ```
 
 The agent should have near-zero integration burden.
@@ -44,6 +45,8 @@ The Skill wraps TreefyIt Build Service and exposes a small tool surface:
 
 ```text
 build_knowledge(file)
+overview_forest()
+search_trees(query)
 overview(tree_id)
 inspect(tree_id, node_id)
 children(tree_id, node_id)
@@ -114,7 +117,6 @@ Input:
   "file": {
     "path": "/absolute/path/to/paper.pdf"
   },
-  "mode": "auto",
   "summarize": true
 }
 ```
@@ -124,7 +126,6 @@ Input fields:
 ```text
 file.path: required if the runtime passes local files by path
 file.name: optional display filename
-mode: optional, auto | md | semantic
 summarize: optional, boolean
 ```
 
@@ -151,6 +152,53 @@ Notes:
 - The returned `tree_id` is the Build Service `build.id`.
 - The MCP server should upload the file as multipart form data.
 - The agent should store `tree_id` in conversation memory.
+
+### overview_forest
+
+Returns the forest-level summary of all available knowledge bases.
+
+Tool name:
+
+```text
+overview_forest
+```
+
+Input:
+
+```json
+{}
+```
+
+Implementation:
+
+```text
+GET /api/forest
+```
+
+### search_trees
+
+Searches the whole forest and returns the most relevant knowledge bases.
+
+Tool name:
+
+```text
+search_trees
+```
+
+Input:
+
+```json
+{
+  "query": "transformer inference optimization",
+  "limit": 5
+}
+```
+
+Implementation:
+
+```text
+GET /api/forest/search/trees?q=<query>&limit=<limit>
+```
 
 ### overview
 

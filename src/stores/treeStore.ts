@@ -10,14 +10,18 @@ export interface BuildStats {
   input_tokens?: number
   output_tokens?: number
   node_count?: number
+  max_depth?: number
+  root_count?: number
   elapsed_sec?: number
-  model?: string
   mode?: string
 }
 
 export interface BuildRecord {
   id: string
+  tree_id?: string
+  bid?: string | null
   filename: string
+  title?: string
   content_type?: string
   file_size?: number
   sha256?: string
@@ -26,9 +30,11 @@ export interface BuildRecord {
   original_file_url?: string | null
   raw_text?: string
   mermaid?: string
-  tree?: TreeNode[]
+  tree?: TreeNode[] | TreeNode
   stats?: BuildStats
   node_count?: number
+  max_depth?: number
+  root_count?: number
   created_at: string
   cached?: boolean
   error?: string
@@ -59,7 +65,7 @@ type BuildStreamStage =
   | 'error'
 
 type BuildStreamEvent =
-  | { type: 'start'; stage?: BuildStreamStage | string; bid?: string; filename?: string; model?: string; mode?: string; summarize?: boolean; file_size?: number; elapsed_sec?: number }
+  | { type: 'start'; stage?: BuildStreamStage | string; bid?: string; filename?: string; summarize?: boolean; file_size?: number; elapsed_sec?: number }
   | { type: 'progress'; stage?: BuildStreamStage | string; message?: string; progress?: number; done?: number; total?: number; chars?: number; nodes?: number; root_nodes?: number; node_count?: number; ok?: boolean; score?: number; elapsed_sec?: number }
   | { type: 'warning'; message?: string; stage?: BuildStreamStage | string; elapsed_sec?: number }
   | { type: 'done'; stage?: BuildStreamStage | string; cached?: boolean; result?: BuildRecord; elapsed_sec?: number }
@@ -111,6 +117,68 @@ function formatApiError(err: unknown, action: string, baseUrl: string) {
     return `${action}失败：无法连接 API 服务。请确认后端已启动，地址为 ${baseUrl}，并已配置 CORS。`
   }
   return `${action}失败：${rawMessage || '未知错误'}`
+}
+
+type BackendTreeNode = TreeNode & {
+  node_id?: string
+  content?: { kind?: string; text?: string }
+  children?: BackendTreeNode[]
+}
+
+type BackendBuildRecord = Partial<Omit<BuildRecord, 'tree'>> & {
+  id?: string
+  bid?: string | null
+  tree_id?: string
+  tree?: BackendTreeNode | BackendTreeNode[]
+  roots?: BackendTreeNode[]
+}
+
+function backendText(node: BackendTreeNode) {
+  return node.text || (node.content?.kind === 'text' ? node.content.text : '') || ''
+}
+
+function normalizeTreeNode(node: BackendTreeNode): TreeNode {
+  return {
+    title: node.title || node.node_id || 'Untitled',
+    line_num: node.line_num,
+    text: backendText(node),
+    summary: node.summary,
+    children: node.children?.map(normalizeTreeNode),
+  }
+}
+
+function normalizeTreeList(tree: BackendBuildRecord['tree']) {
+  if (!tree) return []
+  if (Array.isArray(tree)) return tree.map(normalizeTreeNode)
+  return tree.children?.map(normalizeTreeNode) || [normalizeTreeNode(tree)]
+}
+
+function buildRecordId(record: BackendBuildRecord) {
+  return record.id || record.bid || record.tree_id || ''
+}
+
+function normalizeBuildRecord(record: BackendBuildRecord): BuildRecord {
+  const id = buildRecordId(record)
+  const nodeCount = record.stats?.node_count || record.node_count
+  return {
+    ...record,
+    id,
+    tree_id: record.tree_id || id,
+    bid: record.bid ?? id,
+    filename: record.filename || record.title || 'document.md',
+    created_at: record.created_at || new Date().toISOString(),
+    stats: record.stats || {
+      node_count: nodeCount,
+      max_depth: record.max_depth,
+      root_count: record.root_count,
+    },
+    node_count: nodeCount,
+    tree: normalizeTreeList(record.tree),
+  }
+}
+
+function hasFullTree(record: BuildRecord) {
+  return Array.isArray(record.tree) && record.tree.length > 0
 }
 
 export const useTreeStore = defineStore('tree', () => {
@@ -263,19 +331,10 @@ export const useTreeStore = defineStore('tree', () => {
     buildProgress.value = Math.max(0, Math.min(100, progress))
   }
 
-  function buildFormData(file: File, options: { mode: string; summarize: boolean; model: string }) {
-    const apiConfig = useApiConfigStore()
+  function buildFormData(file: File, options: { summarize: boolean }) {
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('model', options.model)
-    formData.append('mode', options.mode)
     formData.append('summarize', String(options.summarize))
-    if (apiConfig.mode === 'local' && apiConfig.localLlmBaseUrl) {
-      formData.append('llm_base_url', apiConfig.localLlmBaseUrl)
-    }
-    if (apiConfig.mode === 'local' && apiConfig.localApiKey) {
-      formData.append('llm_api_key', apiConfig.localApiKey)
-    }
     return formData
   }
 
@@ -355,11 +414,17 @@ export const useTreeStore = defineStore('tree', () => {
     if (event.type === 'done') {
       if (!event.result) throw new Error('Build stream done event missing result')
       buildProgressMessage.value = '构建完成'
-      applyBuild(event.result)
-      knowledgeBases.value = [
-        toKnowledgeBase(event.result),
-        ...knowledgeBases.value.filter(kb => kb.id !== event.result!.id),
-      ]
+      const record = normalizeBuildRecord(event.result)
+      if (hasFullTree(record)) {
+        applyBuild(record)
+        knowledgeBases.value = [
+          toKnowledgeBase(record),
+          ...knowledgeBases.value.filter(kb => kb.id !== record.id),
+        ]
+      } else {
+        setBuildProgress('complete', 100)
+        updateSourceProgress(record.filename || fileName, 100, 'done')
+      }
       return
     }
 
@@ -406,22 +471,25 @@ export const useTreeStore = defineStore('tree', () => {
     }, 650)
   }
 
-  function toKnowledgeBase(record: BuildRecord): KnowledgeBase {
+  function toKnowledgeBase(rawRecord: BuildRecord): KnowledgeBase {
+    const record = normalizeBuildRecord(rawRecord)
     return {
       id: record.id,
       name: record.filename,
-      description: record.error || `${record.stats?.mode || 'auto'} · ${record.stats?.model || 'deepseek/deepseek-chat'}`,
+      description: record.error || `${record.stats?.mode || 'treefyit'} build`,
       updatedAt: record.created_at,
       documentCount: 1,
       nodeCount: record.stats?.node_count || record.node_count || 0,
     }
   }
 
-  function applyBuild(record: BuildRecord) {
+  function applyBuild(rawRecord: BuildRecord) {
+    const record = normalizeBuildRecord(rawRecord)
+    if (!record.id) throw new Error('Build record missing id/tree_id')
     buildRecords.value[record.id] = record
     currentBuild.value = record
     activeKnowledgeBaseId.value = record.id
-    trees.value = record.tree || []
+    trees.value = Array.isArray(record.tree) ? record.tree : []
     sourceFiles.value = [{
       name: record.filename,
       status: record.error ? 'error' : 'done',
@@ -439,8 +507,8 @@ export const useTreeStore = defineStore('tree', () => {
     try {
       const response = await fetch(resolveApiUrl(apiConfig, 'listBuildHistory'))
       if (!response.ok) throw new Error(`History request failed: ${response.status}`)
-      const payload = await response.json() as BuildRecord[] | { items?: BuildRecord[] }
-      const records = Array.isArray(payload) ? payload : payload.items || []
+      const payload = await response.json() as BackendBuildRecord[] | { items?: BackendBuildRecord[] }
+      const records = (Array.isArray(payload) ? payload : payload.items || []).map(normalizeBuildRecord)
       buildRecords.value = Object.fromEntries(records.map(record => [record.id, record]))
       knowledgeBases.value = records.map(toKnowledgeBase)
       if (records[0]) {
@@ -463,13 +531,13 @@ export const useTreeStore = defineStore('tree', () => {
     error.value = null
     try {
       const cached = buildRecords.value[id]
-      if (cached?.tree) {
+      if (cached && hasFullTree(cached)) {
         applyBuild(cached)
         return
       }
       const response = await fetch(resolveApiUrl(apiConfig, 'getBuild', { bid: id }))
       if (!response.ok) throw new Error(`Build request failed: ${response.status}`)
-      const record = await response.json() as BuildRecord
+      const record = normalizeBuildRecord(await response.json() as BackendBuildRecord)
       applyBuild(record)
       if (!knowledgeBases.value.some(kb => kb.id === record.id)) {
         knowledgeBases.value = [toKnowledgeBase(record), ...knowledgeBases.value]
@@ -479,7 +547,7 @@ export const useTreeStore = defineStore('tree', () => {
     }
   }
 
-  async function buildFromFile(file: File, options: { mode: string; summarize: boolean; model: string }) {
+  async function buildFromFile(file: File, options: { summarize: boolean }) {
     const apiConfig = useApiConfigStore()
     isBuilding.value = true
     error.value = null
@@ -504,6 +572,7 @@ export const useTreeStore = defineStore('tree', () => {
       const decoder = new TextDecoder()
       let buffer = ''
       let completed = false
+      let completedBuildId = ''
 
       while (true) {
         const { value, done } = await reader.read()
@@ -516,7 +585,10 @@ export const useTreeStore = defineStore('tree', () => {
           if (!line.trim()) continue
           const event = JSON.parse(line) as BuildStreamEvent
           applyBuildStreamEvent(event, file.name)
-          if (event.type === 'done') completed = true
+          if (event.type === 'done') {
+            completed = true
+            completedBuildId = event.result ? buildRecordId(event.result) : ''
+          }
         }
       }
 
@@ -524,9 +596,13 @@ export const useTreeStore = defineStore('tree', () => {
       if (buffer.trim()) {
         const event = JSON.parse(buffer) as BuildStreamEvent
         applyBuildStreamEvent(event, file.name)
-        if (event.type === 'done') completed = true
+        if (event.type === 'done') {
+          completed = true
+          completedBuildId = event.result ? buildRecordId(event.result) : ''
+        }
       }
       if (!completed) throw new Error('Build stream ended before done event')
+      if (completedBuildId) await loadBuild(completedBuildId)
     } catch (err) {
       error.value = formatApiError(err, '构建知识树', apiConfig.displayBaseUrl)
       buildProgressMessage.value = '构建失败'
@@ -538,7 +614,7 @@ export const useTreeStore = defineStore('tree', () => {
     }
   }
 
-  async function buildFromFileLegacy(file: File, options: { mode: string; summarize: boolean; model: string }) {
+  async function buildFromFileLegacy(file: File, options: { summarize: boolean }) {
     const apiConfig = useApiConfigStore()
     buildProgressMessage.value = ''
     setBuildProgress('uploading', 12)
@@ -552,7 +628,7 @@ export const useTreeStore = defineStore('tree', () => {
     if (!response.ok) throw new Error(`Build request failed: ${response.status}`)
     setBuildProgress('building', Math.max(buildProgress.value, 92))
     sourceFiles.value = sourceFiles.value.map(item => ({ ...item, status: 'building', parseProgress: 92 }))
-    const record = await response.json() as BuildRecord
+    const record = normalizeBuildRecord(await response.json() as BackendBuildRecord)
     if (record.error) throw new Error(record.error)
     applyBuild(record)
     knowledgeBases.value = [

@@ -19,7 +19,6 @@ const sessionRows = computed(() => chat.sessions.map(session => ({
   ...session,
   title: compactText(session.title || 'Untitled chat'),
   time: formatSessionTime(session.updated_at || session.created_at),
-  model: compactText(session.model || 'unknown model', 28),
 })))
 
 function compactText(text: string, maxLength = 92) {
@@ -159,7 +158,7 @@ defineEmits<{
           <span class="history-dot">{{ record.turn_count }}</span>
           <span>{{ record.title || 'Untitled chat' }}</span>
         </p>
-        <small>{{ record.time }} · {{ record.model }}</small>
+        <small>{{ record.time }}</small>
         <button class="history-delete" type="button" aria-label="删除对话" @click.stop="removeSession(record.id)">
           <Trash2 :size="12" :stroke-width="2.2" aria-hidden="true" />
         </button>

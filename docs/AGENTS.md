@@ -11,7 +11,7 @@ TreefyIt Build Service turns uploaded documents into structured knowledge trees 
 Primary retrieval style:
 
 ```text
-overview -> children -> inspect
+overview_forest/search_trees -> overview -> children -> inspect
 ```
 
 This is intentional. Treat the tree like a document table of contents: understand the structure first, navigate to the relevant branch, then inspect full text only when needed.
@@ -39,12 +39,13 @@ Use the build id returned by `POST /api/build` as the `tree_id` for all tree ins
 ## Recommended Flow
 
 ```text
-1. Build a knowledge tree from a file.
-2. Use the returned build id as tree_id.
-3. Call overview to understand roots.
-4. Call children to navigate large branches.
-5. Call inspect only for nodes likely to contain useful evidence.
-6. Use query logs only for debugging or audit.
+1. Build a knowledge tree from a file if needed.
+2. Use overview_forest or search_trees when you need to choose a knowledge base.
+3. Use the returned build id as tree_id.
+4. Call overview to understand roots.
+5. Call children to navigate large branches.
+6. Call inspect only for nodes likely to contain useful evidence.
+7. Use query logs only for debugging or audit.
 ```
 
 ## Build Knowledge Base
@@ -60,8 +61,6 @@ Form fields:
 
 ```text
 file: required, .md / .pdf / .html / .htm / .zip
-model: optional, default deepseek/deepseek-chat
-mode: optional, auto | md | semantic
 summarize: optional, boolean, default true
 ```
 
@@ -74,14 +73,46 @@ Important response fields:
   "raw_text": "...",
   "tree": [],
   "stats": {
-    "node_count": 42,
-    "model": "deepseek/deepseek-chat",
-    "mode": "auto"
+    "node_count": 42
   },
   "has_original_file": true,
   "original_file_url": "/api/build/1902897a3b4c0d1e/file"
 }
 ```
+
+## Forest Overview
+
+Endpoint:
+
+```http
+GET /api/forest
+```
+
+Use this when the agent needs a quick summary of the whole knowledge-base set.
+
+## Search Trees
+
+Endpoint:
+
+```http
+GET /api/forest/search/trees?q=<query>&limit=5
+```
+
+Response:
+
+```json
+[
+  {
+    "tree_id": "1902897a3b4c0d1e",
+    "tree_title": "paper.pdf",
+    "score": 12.34,
+    "node_count": 42,
+    "root_titles": ["Introduction", "Method", "Results"]
+  }
+]
+```
+
+Use this before opening a tree when the agent knows the topic but not the right knowledge base.
 
 ## List Trees
 
@@ -227,7 +258,6 @@ Request:
 {
   "bid": "1902897a3b4c0d1e",
   "question": "What are the main findings?",
-  "model": "deepseek-chat",
   "session_id": "optional-existing-session"
 }
 ```

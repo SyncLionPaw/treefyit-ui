@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowLeft, BookOpenText, Cloud, Github, Hammer, HardDrive, KeyRound, Link, MessageCircle, Moon, Search, Settings, Sun, X } from 'lucide-vue-next'
+import { ArrowLeft, BookOpenText, Cloud, Github, Hammer, HardDrive, MessageCircle, Moon, Search, Settings, Sun, X } from 'lucide-vue-next'
 import { useUiStore } from '../../stores/uiStore'
 import { useApiConfigStore } from '../../stores/apiConfigStore'
 import type { ApiMode } from '../../stores/apiConfigStore'
@@ -25,8 +25,6 @@ const activeDocKey = ref('api')
 const docContents = ref<Record<string, string>>({})
 const isDocLoading = ref(false)
 const draftApiMode = ref<ApiMode>(apiConfig.mode)
-const draftLocalLlmBaseUrl = ref(apiConfig.localLlmBaseUrl)
-const draftLocalApiKey = ref(apiConfig.localApiKey)
 const docs = [
   { key: 'api', label: 'API', title: 'Build Service API', path: '/docs/build-service-api.md' },
   { key: 'agents', label: 'Agents', title: 'Agent Readme', path: '/docs/AGENTS.md' },
@@ -35,11 +33,7 @@ const docs = [
 const activeDoc = computed(() => docs.find(doc => doc.key === activeDocKey.value) || docs[0])
 const activeDocContent = computed(() => docContents.value[activeDoc.value.key] || (isDocLoading.value ? 'Loading docs...' : 'Docs not loaded.'))
 const activeDocHtml = computed(() => renderMarkdown(activeDocContent.value))
-const apiSettingsTitle = computed(() => (
-  apiConfig.mode === 'local'
-    ? `TreefyIt API: ${apiConfig.displayBaseUrl}; LLM: ${apiConfig.displayLocalLlmBaseUrl}`
-    : `TreefyIt API: ${apiConfig.displayBaseUrl}`
-))
+const apiSettingsTitle = computed(() => `TreefyIt API: ${apiConfig.displayBaseUrl}`)
 let jellyTimer = 0
 let duangTimer = 0
 
@@ -67,8 +61,6 @@ function selectTab(screen: ScreenName) {
 
 function openApiSettings() {
   draftApiMode.value = apiConfig.mode
-  draftLocalLlmBaseUrl.value = apiConfig.localLlmBaseUrl
-  draftLocalApiKey.value = apiConfig.localApiKey
   isApiSettingsOpen.value = true
 }
 
@@ -109,10 +101,6 @@ function closeApiSettings() {
 
 function saveApiSettings() {
   apiConfig.setMode(draftApiMode.value)
-  if (draftApiMode.value === 'local') {
-    apiConfig.updateLocalLlmBaseUrl(draftLocalLlmBaseUrl.value)
-    apiConfig.updateLocalApiKey(draftLocalApiKey.value)
-  }
   closeApiSettings()
 }
 
@@ -229,7 +217,7 @@ watch(activeDocKey, () => {
             <HardDrive :size="15" :stroke-width="2" aria-hidden="true" />
             <span>
               Local
-              <small>使用自己的 LLM Provider</small>
+              <small>连接本地 TreefyIt 服务</small>
             </span>
           </button>
           <button
@@ -241,32 +229,14 @@ watch(activeDocKey, () => {
             <Cloud :size="15" :stroke-width="2" aria-hidden="true" />
             <span>
               Cloud
-              <small>使用托管服务，无需填写本地凭证</small>
+              <small>连接托管 TreefyIt 服务</small>
             </span>
           </button>
         </div>
 
-        <div v-if="draftApiMode === 'local'" class="local-fields">
-          <label class="api-field">
-            <span>
-              <Link :size="13" :stroke-width="2" aria-hidden="true" />
-              LLM Provider Base URL
-            </span>
-            <input v-model="draftLocalLlmBaseUrl" type="text" placeholder="例如 https://api.openai.com/v1 或 https://openrouter.ai/api/v1" required />
-          </label>
-
-          <label class="api-field">
-            <span>
-              <KeyRound :size="13" :stroke-width="2" aria-hidden="true" />
-              LLM Provider API Key
-            </span>
-            <input v-model="draftLocalApiKey" type="password" placeholder="输入你的 LLM Provider API Key" required />
-          </label>
-        </div>
-
-        <div v-else class="cloud-note">
+        <div class="cloud-note">
           <Cloud :size="16" :stroke-width="2" aria-hidden="true" />
-          Cloud 模式将使用 TreefyIt 托管端能力，当前不需要填写 LLM Provider URL 或 API Key。
+          当前前端不再配置或展示 LLM，模型选择与凭证管理统一由后端负责。
         </div>
 
         <div class="modal-actions">

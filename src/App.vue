@@ -90,7 +90,6 @@ onMounted(() => {
 .theme-dark :deep(.json-panel),
 .theme-dark :deep(.chat-input-area),
 .theme-dark :deep(.api-field input),
-.theme-dark :deep(.model-card input),
 .theme-dark :deep(.kb-current),
 .theme-dark :deep(.kb-item),
 .theme-dark :deep(.kb-icon),
@@ -322,8 +321,7 @@ onMounted(() => {
 
 .theme-dark :deep(.api-field input:focus),
 .theme-dark :deep(.select-input:focus),
-.theme-dark :deep(.text-input:focus),
-.theme-dark :deep(.model-card input:focus) {
+.theme-dark :deep(.text-input:focus) {
   border-color: rgba(22, 163, 74, 0.55) !important;
   background: #1d1d1d !important;
   box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12) !important;
