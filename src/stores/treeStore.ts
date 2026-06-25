@@ -181,6 +181,43 @@ function hasFullTree(record: BuildRecord) {
   return Array.isArray(record.tree) && record.tree.length > 0
 }
 
+function cloneTreeWithPrefix(
+  node: TreeNode,
+  options: { id: string; source: string },
+): TreeNode {
+  const { id, source } = options
+  return {
+    ...node,
+    id,
+    path: id,
+    source,
+    children: node.children?.map((child, index) => cloneTreeWithPrefix(child, {
+      id: `${id}.${index}`,
+      source,
+    })),
+  }
+}
+
+function forestRootFromBuildRecord(record: BuildRecord, kb: KnowledgeBase): TreeNode {
+  const rootId = record.id
+  const children = hasFullTree(record)
+    ? (record.tree as TreeNode[]).map((child, index) => cloneTreeWithPrefix(child, {
+      id: `${rootId}.${index}`,
+      source: kb.name,
+    }))
+    : []
+
+  return {
+    id: rootId,
+    path: rootId,
+    title: kb.name,
+    source: kb.name,
+    summary: record.error || kb.description,
+    tokenCount: Math.max(1, Math.ceil((kb.description || kb.name).length / 4)),
+    children,
+  }
+}
+
 export const useTreeStore = defineStore('tree', () => {
   const trees = ref<TreeNode[]>([])
   const sourceFiles = ref<SourceFile[]>([])
@@ -242,6 +279,25 @@ export const useTreeStore = defineStore('tree', () => {
   })
   const buildLinks = computed(() => {
     const { links } = flattenTree(buildTrees.value, activeKnowledgeBase.value?.name)
+    return links
+  })
+  const forestTrees = computed<TreeNode[]>(() => (
+    knowledgeBases.value.map(kb => forestRootFromBuildRecord(
+      buildRecords.value[kb.id] || {
+        id: kb.id,
+        filename: kb.name,
+        created_at: kb.updatedAt,
+        tree: [],
+      },
+      kb,
+    ))
+  ))
+  const forestFlatNodes = computed(() => {
+    const { nodes } = flattenTree(forestTrees.value)
+    return nodes
+  })
+  const forestLinks = computed(() => {
+    const { links } = flattenTree(forestTrees.value)
     return links
   })
   const buildPhaseLabel = computed(() => buildProgressMessage.value || BUILD_PHASE_LABELS[buildPhase.value])
@@ -655,15 +711,19 @@ export const useTreeStore = defineStore('tree', () => {
     return buildFlatNodes.value.find(n => n.id === id)
   }
 
+  function getForestNodeById(id: string): FlatNode | undefined {
+    return forestFlatNodes.value.find(n => n.id === id)
+  }
+
   return {
     trees, sourceFiles, selectedNodeId, activeKnowledgeBaseId, knowledgeBases,
     buildRecords, currentBuild, isLoadingHistory, isBuilding, buildPhase, buildProgress, buildPhaseLabel, error,
     enrichedTrees, flatNodes, links, sourceColorMap, activeKnowledgeBase,
-    buildTrees, buildFlatNodes, buildLinks,
+    buildTrees, buildFlatNodes, buildLinks, forestTrees, forestFlatNodes, forestLinks,
     totalNodes, totalTokens, sources,
     hasKnowledgeBases, hasActiveBuild, hasBuildTree,
     activeBuildTitle, activeBuildDescription, activeBuildNodeCount,
     historyGuard, buildGuard,
-    loadHistory, loadBuild, buildFromFile, selectNode, setActiveKnowledgeBase, getNodeById, getBuildNodeById,
+    loadHistory, loadBuild, buildFromFile, selectNode, setActiveKnowledgeBase, getNodeById, getBuildNodeById, getForestNodeById,
   }
 })

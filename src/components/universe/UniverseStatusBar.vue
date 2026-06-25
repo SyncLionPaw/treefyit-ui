@@ -7,12 +7,24 @@ import { useUiStore } from '../../stores/uiStore'
 const tree = useTreeStore()
 const ui = useUiStore()
 
+const visibleNodes = computed(() => (
+  ui.universeGraphScope === 'tree' ? tree.buildFlatNodes : tree.forestFlatNodes
+))
+const visibleSources = computed(() => [...new Set(visibleNodes.value.map(node => node.source))])
+
 const statusText = computed(() => {
-  const selected = tree.selectedNodeId ? tree.getNodeById(tree.selectedNodeId) : null
+  const selected = !tree.selectedNodeId
+    ? null
+    : ui.universeGraphScope === 'tree'
+      ? tree.getBuildNodeById(tree.selectedNodeId)
+      : tree.getForestNodeById(tree.selectedNodeId)
   if (selected) {
     return `已选中 ${selected.title} · ${selected.source} · ${selected.tokenCount} tokens`
   }
-  return `${tree.totalNodes} 节点 · ${tree.totalTokens.toLocaleString()} tokens · ${tree.sources.length} 文档`
+  if (ui.universeGraphScope === 'tree') {
+    return `${tree.activeBuildNodeCount} 节点 · 当前知识库 · ${tree.activeBuildTitle}`
+  }
+  return `${visibleNodes.value.length} 节点 · ${tree.knowledgeBases.length} 个知识库 · ${visibleSources.value.length} 个来源`
 })
 </script>
 
@@ -27,6 +39,7 @@ const statusText = computed(() => {
       <span>滚轮缩放</span>
       <span>↑ / Esc 返回</span>
       <span>Hover 详情</span>
+      <span>{{ ui.universeGraphScope === 'tree' ? '当前知识库视图' : '全量知识库视图' }}</span>
       <button class="label-toggle" type="button" @click="ui.toggleUniverseLabels">
         <span :class="{ active: ui.isUniverseLabelsVisible }"><span></span></span>
         Labels

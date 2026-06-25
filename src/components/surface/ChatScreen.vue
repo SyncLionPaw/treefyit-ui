@@ -34,7 +34,7 @@ const isReplayOpen = ref(false)
       <ChatMessages v-else />
       <div class="scroll-hint" v-if="!ui.isUniverseMode && !ui.isUniverseHintDismissed && tree.flatNodes.length > 0">
         <span class="hint-arrow">↓</span>
-        <span class="hint-text">按 ↓ 探索知识树宇宙</span>
+        <span class="hint-text">按 ↓ 查看知识图谱</span>
         <button class="hint-close" type="button" aria-label="关闭宇宙提示" @click="ui.dismissUniverseHint()">
           <X :size="12" :stroke-width="2.2" aria-hidden="true" />
         </button>

@@ -128,6 +128,11 @@ function ensureTextPart(message: ChatMessage) {
   return nextPart
 }
 
+function setMessageText(message: ChatMessage, content: string) {
+  message.content = content
+  ensureTextPart(message).content = content
+}
+
 function findToolEvent(message: ChatMessage, id: string, name?: string) {
   return message.toolEvents?.find(item => item.id === id || item.name === name)
 }
@@ -171,7 +176,7 @@ export const useChatStore = defineStore('chat', () => {
   function applyChatEvent(messageId: string, event: ChatStreamEvent) {
     if (event.type === 'start') {
       if (event.session_id) currentSessionId.value = event.session_id
-      if (event.bid || event.tree_id) currentSessionBid.value = event.bid || event.tree_id || null
+      currentSessionBid.value = event.bid || event.tree_id || null
       updateMessage(messageId, message => {
         if (event.filename) message.sourceRef = event.filename
       })
@@ -302,9 +307,10 @@ export const useChatStore = defineStore('chat', () => {
     const apiConfig = useApiConfigStore()
     const tree = useTreeStore()
     const currentBuild = tree.currentBuild
-    const sessionId = currentBuild?.id && currentSessionBid.value === currentBuild.id
-      ? currentSessionId.value
-      : null
+    const hasSelectedBuild = Boolean(currentBuild?.id)
+    const sessionId = hasSelectedBuild
+      ? (currentSessionBid.value === currentBuild?.id ? currentSessionId.value : null)
+      : (currentSessionBid.value ? null : currentSessionId.value)
 
     messages.value.push({
       id: `${Date.now()}`,
@@ -341,11 +347,18 @@ export const useChatStore = defineStore('chat', () => {
 
       await readChatStream(response, aiMessage.id)
       updateMessage(aiMessage.id, message => {
-        if (!message.content.trim()) message.content = 'Chat API 已返回，但没有生成答案文本。'
+        if (!message.content.trim()) {
+          const fallback = message.toolEvents?.length
+            ? '已完成工具调用，但模型没有返回最终答复。请重试一次，或换个问题再问。'
+            : 'Chat API 已返回，但没有生成答案文本。'
+          setMessageText(message, fallback)
+        }
       })
     } catch (err) {
       updateMessage(aiMessage.id, message => {
         message.role = 'system'
+        message.toolEvents = undefined
+        message.parts = [{ id: `${message.id}-text-error`, type: 'text', content: formatChatError(err, apiConfig.displayBaseUrl) }]
         message.content = formatChatError(err, apiConfig.displayBaseUrl)
         message.sourceRef = undefined
       })

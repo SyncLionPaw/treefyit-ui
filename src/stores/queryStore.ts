@@ -15,19 +15,46 @@ function formatApiError(err: unknown, baseUrl: string) {
 
 export const useQueryStore = defineStore('query', () => {
   const params = ref<QueryParams>({
-    tool: 'inspect',
+    tool: 'overview_forest',
     path: '0',
+    query: '',
   })
   const result = ref<object | null>(null)
   const isLoading = ref(false)
   const error = ref<string | null>(null)
 
+  function withQuery(url: string, query: string) {
+    const normalizedQuery = query.trim()
+    if (!normalizedQuery) return url
+    const separator = url.includes('?') ? '&' : '?'
+    return `${url}${separator}q=${encodeURIComponent(normalizedQuery)}`
+  }
+
+  function requiresTree(tool: QueryParams['tool']) {
+    return tool === 'overview' || tool === 'inspect' || tool === 'children'
+  }
+
+  function requiresPath(tool: QueryParams['tool']) {
+    return tool === 'inspect' || tool === 'children'
+  }
+
+  function requiresSearchQuery(tool: QueryParams['tool']) {
+    return tool === 'search_trees' || tool === 'search_nodes'
+  }
+
   async function executeQuery() {
     const apiConfig = useApiConfigStore()
     const tree = useTreeStore()
+    const tool = params.value.tool
     const treeId = tree.activeKnowledgeBaseId
-    if (!treeId) {
-      error.value = '请先在 Build 中构建或选择一棵知识树'
+
+    if (requiresTree(tool) && !treeId) {
+      error.value = '请先选择一个 tree'
+      result.value = null
+      return
+    }
+    if (requiresSearchQuery(tool) && !params.value.query.trim()) {
+      error.value = '请输入搜索内容'
       result.value = null
       return
     }
@@ -36,15 +63,30 @@ export const useQueryStore = defineStore('query', () => {
     error.value = null
     try {
       const path = params.value.path.trim()
-      const endpoint = params.value.tool === 'overview'
-        ? 'getTree'
-        : params.value.tool === 'children'
-          ? 'getChildren'
-          : 'inspectNode'
-      const requestParams: Record<string, string> = endpoint === 'getTree'
-        ? { treeId }
-        : { treeId, path: path || '0' }
-      const response = await fetch(resolveApiUrl(apiConfig, endpoint, requestParams))
+      let url = ''
+
+      switch (tool) {
+        case 'overview_forest':
+          url = resolveApiUrl(apiConfig, 'getForest')
+          break
+        case 'search_trees':
+          url = withQuery(resolveApiUrl(apiConfig, 'searchTrees'), params.value.query)
+          break
+        case 'search_nodes':
+          url = withQuery(resolveApiUrl(apiConfig, 'searchForestNodes'), params.value.query)
+          break
+        case 'overview':
+          url = resolveApiUrl(apiConfig, 'getTree', { treeId })
+          break
+        case 'children':
+          url = resolveApiUrl(apiConfig, 'getChildren', { treeId, path: path || '0' })
+          break
+        case 'inspect':
+          url = resolveApiUrl(apiConfig, 'inspectNode', { treeId, path: path || '0' })
+          break
+      }
+
+      const response = await fetch(url)
       if (!response.ok) throw new Error(`Query request failed: ${response.status}`)
       result.value = await response.json() as object
     } catch (err) {
@@ -55,5 +97,14 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
-  return { params, result, isLoading, error, executeQuery }
+  return {
+    params,
+    result,
+    isLoading,
+    error,
+    executeQuery,
+    requiresTree,
+    requiresPath,
+    requiresSearchQuery,
+  }
 })

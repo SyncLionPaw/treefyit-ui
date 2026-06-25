@@ -71,9 +71,11 @@ export type ChatMessagePart =
   | { id: string; type: 'tool'; toolEvent: ChatToolEvent }
 
 export interface QueryParams {
-  tool: 'overview' | 'inspect' | 'children'
+  tool: 'overview_forest' | 'search_trees' | 'search_nodes' | 'overview' | 'inspect' | 'children'
   path: string
+  query: string
 }
 
 export type ScreenName = 'build' | 'chat' | 'query'
 export type UniverseTransition = 'surface' | 'entering' | 'universe' | 'exiting'
+export type KnowledgeGraphScope = 'forest' | 'tree'

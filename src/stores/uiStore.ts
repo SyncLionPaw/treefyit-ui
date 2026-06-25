@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { ScreenName, UniverseTransition } from '../types'
+import type { KnowledgeGraphScope, ScreenName, UniverseTransition } from '../types'
 
 export const useUiStore = defineStore('ui', () => {
   const activeScreen = ref<ScreenName>('chat')
@@ -12,6 +12,7 @@ export const useUiStore = defineStore('ui', () => {
   const parallaxOffset = ref({ x: 0, y: 0 })
   const isUniverseHintDismissed = ref(false)
   const isUniverseLabelsVisible = ref(true)
+  const universeGraphScope = ref<KnowledgeGraphScope>('forest')
 
   function setScreen(screen: ScreenName) {
     activeScreen.value = screen
@@ -57,9 +58,13 @@ export const useUiStore = defineStore('ui', () => {
     isUniverseLabelsVisible.value = !isUniverseLabelsVisible.value
   }
 
+  function setUniverseGraphScope(scope: KnowledgeGraphScope) {
+    universeGraphScope.value = scope
+  }
+
   return {
     activeScreen, themeMode, isUniverseMode, isChatKnowledgeDocked, universeTransition,
-    hoveredNodeId, parallaxOffset, isUniverseHintDismissed, isUniverseLabelsVisible,
-    setScreen, toggleTheme, setChatKnowledgeDocked, enterUniverse, exitUniverse, setHoveredNode, setParallax, dismissUniverseHint, toggleUniverseLabels,
+    hoveredNodeId, parallaxOffset, isUniverseHintDismissed, isUniverseLabelsVisible, universeGraphScope,
+    setScreen, toggleTheme, setChatKnowledgeDocked, enterUniverse, exitUniverse, setHoveredNode, setParallax, dismissUniverseHint, toggleUniverseLabels, setUniverseGraphScope,
   }
 })

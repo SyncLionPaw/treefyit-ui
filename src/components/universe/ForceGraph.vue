@@ -9,10 +9,14 @@ const svg = ref<SVGSVGElement | null>(null)
 const tree = useTreeStore()
 const ui = useUiStore()
 const { selectedNodeId } = storeToRefs(tree)
-const { hoveredNodeId, isUniverseLabelsVisible } = storeToRefs(ui)
+const { hoveredNodeId, isUniverseLabelsVisible, universeGraphScope } = storeToRefs(ui)
 
-const nodes = computed(() => tree.flatNodes)
-const links = computed(() => tree.links)
+const nodes = computed(() => (
+  universeGraphScope.value === 'tree' ? tree.buildFlatNodes : tree.forestFlatNodes
+))
+const links = computed(() => (
+  universeGraphScope.value === 'tree' ? tree.buildLinks : tree.forestLinks
+))
 
 const graph = useForceGraph(svg, nodes, links, {
   hoveredNodeId,
@@ -29,7 +33,7 @@ onUnmounted(graph.teardown)
   <svg
     ref="svg"
     class="force-graph"
-    aria-label="知识树力导布局"
+    :aria-label="universeGraphScope === 'tree' ? '当前知识库图谱' : '全量知识库图谱'"
     role="img"
   ></svg>
 </template>
