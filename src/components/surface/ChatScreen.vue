@@ -33,7 +33,6 @@ const isReplayOpen = ref(false)
       <ChatEmptyState v-if="chat.messages.length === 0" />
       <ChatMessages v-else />
       <div class="scroll-hint" v-if="!ui.isUniverseMode && !ui.isUniverseHintDismissed && tree.flatNodes.length > 0">
-        <span class="hint-arrow">↓</span>
         <span class="hint-text">按 ↓ 查看知识图谱</span>
         <button class="hint-close" type="button" aria-label="关闭宇宙提示" @click="ui.dismissUniverseHint()">
           <X :size="12" :stroke-width="2.2" aria-hidden="true" />
@@ -122,11 +121,6 @@ const isReplayOpen = ref(false)
   animation: hintBounce 2s ease-in-out infinite;
 }
 
-.hint-arrow {
-  font-size: $font-size-lg;
-  animation: hintFloat 1.5s ease-in-out infinite;
-}
-
 .hint-close {
   display: inline-flex;
   align-items: center;
@@ -153,8 +147,4 @@ const isReplayOpen = ref(false)
   50% { opacity: 1; }
 }
 
-@keyframes hintFloat {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(3px); }
-}
 </style>

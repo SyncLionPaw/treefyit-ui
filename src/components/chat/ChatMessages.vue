@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { useChatStore } from '../../stores/chatStore'
 import { computed, nextTick, ref, watch } from 'vue'
-import { CheckCircle2, CircleX, LoaderCircle, Paperclip, Search } from 'lucide-vue-next'
+import { Brain, Paperclip, Search } from 'lucide-vue-next'
 import { renderMarkdown } from '../../utils/markdown'
 
 const chat = useChatStore()
 const messagesEl = ref<HTMLElement | null>(null)
+const thinkingOpen = ref<Record<string, boolean>>({})
 
 const scrollSignature = computed(() => chat.messages.map(message => {
   const parts = message.parts?.map(part => (
-    part.type === 'text'
+    part.type === 'text' || part.type === 'reasoning'
       ? part.content
       : `${part.toolEvent.status}:${part.toolEvent.arguments || ''}:${part.toolEvent.result || ''}`
   )).join('|') || message.content
@@ -33,6 +34,26 @@ function formatToolArguments(args?: string) {
   if (!args) return ''
   return args.length > 140 ? `${args.slice(0, 140)}...` : args
 }
+
+function compactThinkingText(text: string, maxLength = 72) {
+  const compacted = text.replace(/\s+/g, ' ').trim()
+  return compacted.length > maxLength ? `${compacted.slice(0, maxLength)}...` : compacted
+}
+
+function isThinkingExpanded(messageId: string, partId: string, isStreaming?: boolean) {
+  if (isStreaming) return true
+  return thinkingOpen.value[`${messageId}:${partId}`] ?? false
+}
+
+function updateThinkingExpanded(messageId: string, partId: string, event: Event) {
+  const element = event.currentTarget as HTMLDetailsElement | null
+  if (!element) return
+  thinkingOpen.value[`${messageId}:${partId}`] = element.open
+}
+
+function shouldRenderMarkdown(isStreaming?: boolean) {
+  return !isStreaming
+}
 </script>
 
 <template>
@@ -48,8 +69,34 @@ function formatToolArguments(args?: string) {
           v-for="part in msg.parts"
           :key="part.id"
         >
-          <div v-if="part.type === 'text' && part.content.trim()" class="bubble">
-            <div class="content markdown-content" v-html="renderMarkdown(part.content)"></div>
+          <details
+            v-if="part.type === 'reasoning' && part.content.trim()"
+            class="thinking-block"
+            :open="isThinkingExpanded(msg.id, part.id, msg.isStreaming)"
+            @toggle="updateThinkingExpanded(msg.id, part.id, $event)"
+          >
+            <summary class="thinking-summary" aria-label="展开思考内容">
+              <span class="thinking-label" aria-hidden="true">
+                <Brain :size="13" :stroke-width="2.1" />
+              </span>
+              <span class="thinking-preview">{{ compactThinkingText(part.content) }}</span>
+            </summary>
+            <div class="thinking-body">
+              <div
+                v-if="shouldRenderMarkdown(msg.isStreaming)"
+                class="thinking-content markdown-content"
+                v-html="renderMarkdown(part.content)"
+              ></div>
+              <pre v-else class="thinking-content streaming-text">{{ part.content }}</pre>
+            </div>
+          </details>
+          <div v-else-if="part.type === 'text' && part.content.trim()" class="bubble">
+            <div
+              v-if="shouldRenderMarkdown(msg.isStreaming)"
+              class="content markdown-content"
+              v-html="renderMarkdown(part.content)"
+            ></div>
+            <pre v-else class="content streaming-text">{{ part.content }}</pre>
           </div>
           <details
             v-else-if="part.type === 'tool'"
@@ -60,17 +107,9 @@ function formatToolArguments(args?: string) {
               class="tool-event"
               :class="part.toolEvent.status"
             >
-              <div class="tool-icon">
-                <LoaderCircle v-if="part.toolEvent.status === 'running'" class="spin" :size="13" :stroke-width="2.2" aria-hidden="true" />
-                <CheckCircle2 v-else-if="part.toolEvent.status === 'done'" :size="13" :stroke-width="2.2" aria-hidden="true" />
-                <CircleX v-else :size="13" :stroke-width="2.2" aria-hidden="true" />
-              </div>
               <div class="tool-body">
                 <div class="tool-title">
                   <Search :size="13" :stroke-width="2.1" aria-hidden="true" />
-                  <span>
-                    {{ part.toolEvent.status === 'running' ? 'Agent 正在使用检索工具' : part.toolEvent.status === 'done' ? '检索工具调用完成' : '检索工具调用失败' }}
-                  </span>
                   <code>{{ part.toolEvent.name }}</code>
                 </div>
               </div>
@@ -94,7 +133,12 @@ function formatToolArguments(args?: string) {
         </div>
       </div>
       <div v-else class="bubble">
-        <div class="content markdown-content" v-html="renderMarkdown(msg.content)"></div>
+        <div
+          v-if="shouldRenderMarkdown(msg.isStreaming)"
+          class="content markdown-content"
+          v-html="renderMarkdown(msg.content)"
+        ></div>
+        <pre v-else class="content streaming-text">{{ msg.content }}</pre>
         <div v-if="msg.sourceRef" class="source-ref">
           <Paperclip :size="12" :stroke-width="2" aria-hidden="true" />
           {{ msg.sourceRef }}
@@ -118,12 +162,14 @@ function formatToolArguments(args?: string) {
 
 .message {
   display: flex;
-  max-width: min(74%, 760px);
+  width: fit-content;
+  max-width: 100%;
   animation: fadeIn 300ms ease;
 
   &.user {
     align-self: flex-end;
     flex-direction: row-reverse;
+    max-width: min(72%, 760px);
 
     .bubble {
       background: $color-primary;
@@ -135,6 +181,7 @@ function formatToolArguments(args?: string) {
 
   &.ai {
     align-self: flex-start;
+    width: min(84%, 980px);
 
     .bubble {
       background: rgba(255, 255, 255, 0.78);
@@ -146,7 +193,7 @@ function formatToolArguments(args?: string) {
 
   &.system {
     align-self: center;
-    max-width: min(82%, 720px);
+    width: min(82%, 720px);
 
     .bubble {
       border: 1px solid rgba($color-warning, 0.22);
@@ -163,10 +210,115 @@ function formatToolArguments(args?: string) {
   width: 100%;
 
   .bubble,
+  .thinking-block,
   .tool-events {
     width: 100%;
     box-sizing: border-box;
   }
+}
+
+.thinking-block {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: $radius-panel;
+  background: rgba(15, 23, 42, 0.04);
+  color: $color-text-light;
+}
+
+.thinking-block[open] {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
+}
+
+.thinking-summary {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  cursor: pointer;
+  line-height: 1;
+  list-style: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+}
+
+.thinking-block[open] .thinking-summary {
+  grid-template-columns: 16px;
+}
+
+.thinking-body {
+  margin-top: 6px;
+  padding-left: 24px;
+}
+
+.thinking-block[open] .thinking-body {
+  margin-top: 0;
+  padding-left: 0;
+}
+
+.thinking-block:not([open]) .thinking-body {
+  display: none;
+}
+
+.thinking-block[open] .thinking-preview {
+  display: none;
+}
+
+.thinking-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  line-height: 0;
+  font-size: $font-size-xs;
+  color: rgba(15, 23, 42, 0.52);
+
+  :deep(svg) {
+    display: block;
+    flex: 0 0 auto;
+  }
+}
+
+.thinking-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(15, 23, 42, 0.72);
+  font-size: $font-size-sm;
+  line-height: 18px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.thinking-content {
+  font-size: $font-size-sm;
+  line-height: $line-height-relaxed;
+
+  :deep(p) { margin: 0; }
+  :deep(p + p) { margin-top: 8px; }
+  :deep(.md-image) {
+    display: block;
+    max-width: min(100%, 680px);
+    max-height: 360px;
+    width: auto;
+    height: auto;
+    margin: 8px 0 0;
+    border-radius: $radius-control;
+    object-fit: contain;
+  }
+}
+
+.streaming-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
 }
 
 .bubble {
@@ -202,6 +354,16 @@ function formatToolArguments(args?: string) {
   :deep(pre code) {
     padding: 0;
     background: transparent;
+  }
+  :deep(.md-image) {
+    display: block;
+    max-width: min(100%, 720px);
+    max-height: 420px;
+    width: auto;
+    height: auto;
+    margin: 8px 0 0;
+    border-radius: $radius-control;
+    object-fit: contain;
   }
   :deep(ul),
   :deep(ol) {
@@ -269,9 +431,7 @@ function formatToolArguments(args?: string) {
 }
 
 .tool-event {
-  display: grid;
-  grid-template-columns: 22px 1fr;
-  gap: 8px;
+  display: block;
   padding: 6px 10px;
   border: 1px solid rgba($color-primary, 0.2);
   border-radius: $radius-control;
@@ -294,20 +454,6 @@ function formatToolArguments(args?: string) {
 .tool-event.error {
   border-color: rgba($color-error, 0.24);
   background: rgba($color-error, 0.07);
-}
-
-.tool-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.72);
-  color: $color-primary;
-
-  .running & { color: $color-info; }
-  .error & { color: $color-error; }
 }
 
 .tool-body {
@@ -366,16 +512,41 @@ function formatToolArguments(args?: string) {
   background: rgba(255,255,255,0.58);
 }
 
-.spin {
-  animation: spin 900ms linear infinite;
-}
-
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
+@media (max-width: 960px) {
+  .message {
+    &.user {
+      max-width: min(78%, 760px);
+    }
+
+    &.ai {
+      width: min(90%, 980px);
+    }
+
+    &.system {
+      width: min(90%, 720px);
+    }
+  }
+}
+
+@media (max-width: 640px) {
+  .chat-messages {
+    padding: 20px 16px;
+  }
+
+  .message {
+    &.user {
+      max-width: min(88%, 760px);
+    }
+
+    &.ai,
+    &.system {
+      width: 100%;
+    }
+  }
 }
 </style>

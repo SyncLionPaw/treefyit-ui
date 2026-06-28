@@ -52,6 +52,7 @@ export interface ChatMessage {
   role: 'user' | 'ai' | 'system'
   content: string
   timestamp: string
+  isStreaming?: boolean
   sourceRef?: string
   toolEvents?: ChatToolEvent[]
   parts?: ChatMessagePart[]
@@ -68,6 +69,7 @@ export interface ChatToolEvent {
 
 export type ChatMessagePart =
   | { id: string; type: 'text'; content: string }
+  | { id: string; type: 'reasoning'; content: string }
   | { id: string; type: 'tool'; toolEvent: ChatToolEvent }
 
 export interface QueryParams {

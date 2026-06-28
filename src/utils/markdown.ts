@@ -138,6 +138,18 @@ const markdown = new MarkdownIt({
   typographer: true,
 })
 
+const defaultImageRenderer = markdown.renderer.rules.image
+
+markdown.renderer.rules.image = (tokens, idx, options, env, self) => {
+  const token = tokens[idx]
+  token.attrSet('class', 'md-image')
+  token.attrSet('loading', 'lazy')
+  token.attrSet('decoding', 'async')
+  return defaultImageRenderer
+    ? defaultImageRenderer(tokens, idx, options, env, self)
+    : self.renderToken(tokens, idx, options)
+}
+
 export function renderMarkdown(text: string) {
   const normalized = normalizeMarkdown(text)
   if (!normalized) return ''

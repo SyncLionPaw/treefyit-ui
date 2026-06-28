@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { AlertCircle, Braces, ClipboardList, Copy, Database, FlaskConical, LoaderCircle, Search, SlidersHorizontal } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { AlertCircle, Braces, Check, ChevronDown, ClipboardList, Copy, Database, FlaskConical, LoaderCircle, Search, SlidersHorizontal } from 'lucide-vue-next'
 import { useQueryStore } from '../../stores/queryStore'
 import { useTreeStore } from '../../stores/treeStore'
 import JsonRenderer from '../common/JsonRenderer.vue'
 
 const query = useQueryStore()
 const tree = useTreeStore()
+const knowledgeMenuOpen = ref(false)
+const knowledgeMenuActiveIndex = ref(0)
 
 const toolOptions = [
   { value: 'overview_forest', label: 'Forest Overview' },
@@ -92,15 +94,83 @@ const toolSchema = computed(() => {
     },
   }
 })
+const activeKnowledgeBase = computed(() => (
+  tree.knowledgeBases.find(kb => kb.id === tree.activeKnowledgeBaseId) || tree.knowledgeBases[0]
+))
+const activeKnowledgeBaseIndex = computed(() => (
+  Math.max(0, tree.knowledgeBases.findIndex(kb => kb.id === activeKnowledgeBase.value?.id))
+))
 
 function execute() {
   query.executeQuery()
 }
 
-function selectKnowledgeBase(event: Event) {
-  const id = (event.target as HTMLSelectElement).value
-  if (id) tree.setActiveKnowledgeBase(id)
+function openKnowledgeMenu() {
+  knowledgeMenuActiveIndex.value = activeKnowledgeBaseIndex.value
+  knowledgeMenuOpen.value = true
 }
+
+function closeKnowledgeMenu() {
+  knowledgeMenuOpen.value = false
+}
+
+function toggleKnowledgeMenu() {
+  if (knowledgeMenuOpen.value) {
+    closeKnowledgeMenu()
+    return
+  }
+  openKnowledgeMenu()
+}
+
+function selectKnowledgeBase(id: string) {
+  tree.setActiveKnowledgeBase(id)
+  closeKnowledgeMenu()
+}
+
+function moveKnowledgeMenuSelection(offset: number) {
+  const total = tree.knowledgeBases.length
+  if (!total) return
+  knowledgeMenuActiveIndex.value = (knowledgeMenuActiveIndex.value + offset + total) % total
+}
+
+function handleKnowledgeMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    closeKnowledgeMenu()
+    return
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    if (!knowledgeMenuOpen.value) openKnowledgeMenu()
+    moveKnowledgeMenuSelection(1)
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (!knowledgeMenuOpen.value) openKnowledgeMenu()
+    moveKnowledgeMenuSelection(-1)
+    return
+  }
+  if (event.key === 'Enter' && knowledgeMenuOpen.value) {
+    event.preventDefault()
+    const target = tree.knowledgeBases[knowledgeMenuActiveIndex.value]
+    if (target) selectKnowledgeBase(target.id)
+  }
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  const target = event.target
+  if (!(target instanceof Element)) return
+  if (target.closest('.query-select-wrap')) return
+  closeKnowledgeMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+})
 </script>
 
 <template>
@@ -120,16 +190,39 @@ function selectKnowledgeBase(event: Event) {
           <Database :size="13" :stroke-width="2" aria-hidden="true" />
           Tree
         </span>
-        <select class="select-input" :value="tree.activeKnowledgeBaseId" @change="selectKnowledgeBase">
-          <option v-if="!tree.hasKnowledgeBases" value="">{{ tree.historyGuard.title }}</option>
-          <option
-            v-for="kb in tree.knowledgeBases"
-            :key="kb.id"
-            :value="kb.id"
+        <div class="query-select-wrap" @keydown="handleKnowledgeMenuKeydown">
+          <button
+            class="select-input query-select-trigger"
+            type="button"
+            aria-label="选择知识库"
+            aria-haspopup="listbox"
+            :aria-expanded="knowledgeMenuOpen"
+            :disabled="!tree.hasKnowledgeBases"
+            @click="toggleKnowledgeMenu"
           >
-            {{ kb.name }}
-          </option>
-        </select>
+            <span>{{ activeKnowledgeBase?.name || tree.historyGuard.title }}</span>
+            <ChevronDown class="query-select-icon" :class="{ open: knowledgeMenuOpen }" :size="14" :stroke-width="2" aria-hidden="true" />
+          </button>
+          <div v-if="knowledgeMenuOpen" class="query-select-menu" role="listbox" aria-label="选择知识库">
+            <button
+              v-for="(kb, index) in tree.knowledgeBases"
+              :key="kb.id"
+              class="query-select-option"
+              :class="{
+                active: kb.id === tree.activeKnowledgeBaseId,
+                focused: index === knowledgeMenuActiveIndex,
+              }"
+              type="button"
+              role="option"
+              :aria-selected="kb.id === tree.activeKnowledgeBaseId"
+              @mouseenter="knowledgeMenuActiveIndex = index"
+              @click="selectKnowledgeBase(kb.id)"
+            >
+              <span>{{ kb.name }}</span>
+              <Check v-if="kb.id === tree.activeKnowledgeBaseId" :size="14" :stroke-width="2.2" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="field">
@@ -290,7 +383,7 @@ function selectKnowledgeBase(event: Event) {
 
 .meta-card {
   display: grid;
-  grid-template-columns: 1fr 132px;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -305,6 +398,11 @@ function selectKnowledgeBase(event: Event) {
     color: $color-text-light;
     font-size: $font-size-sm;
   }
+}
+
+.query-select-wrap {
+  position: relative;
+  min-width: 0;
 }
 
 .field {
@@ -339,9 +437,106 @@ function selectKnowledgeBase(event: Event) {
 }
 
 .select-input {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   height: 32px;
   padding: 0 10px;
   font-size: $font-size-sm;
+}
+
+.query-select-trigger {
+  cursor: pointer;
+  text-align: left;
+  transition: border-color $transition-fast, background $transition-fast, color $transition-fast, box-shadow $transition-fast;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.56;
+  }
+
+  span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &:hover:not(:disabled) {
+    border-color: rgba($color-primary, 0.32);
+    background: $color-accent;
+    color: $color-primary;
+  }
+
+  &[aria-expanded='true'] {
+    border-color: rgba($color-primary, 0.45);
+    background: $color-accent;
+    color: $color-primary;
+    box-shadow: 0 0 0 3px rgba($color-primary, 0.08);
+  }
+}
+
+.query-select-icon {
+  flex: 0 0 auto;
+  color: currentColor;
+  opacity: 0.72;
+  transition: transform $transition-fast;
+
+  &.open {
+    transform: rotate(180deg);
+  }
+}
+
+.query-select-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  width: min(280px, calc(100vw - 32px));
+  max-height: 240px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid rgba($color-primary, 0.18);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba($color-primary, 0.13);
+}
+
+.query-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: $color-text;
+  cursor: pointer;
+  font-size: $font-size-sm;
+  text-align: left;
+  transition: background $transition-fast, color $transition-fast;
+
+  span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &.focused {
+    background: rgba($color-primary, 0.08);
+    color: $color-primary;
+  }
+
+  &.active {
+    background: $color-accent;
+    color: $color-primary;
+    font-weight: $font-weight-semibold;
+  }
 }
 
 .text-input {

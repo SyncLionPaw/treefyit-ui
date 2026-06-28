@@ -28,6 +28,7 @@ export type ApiEndpointName = keyof typeof API_ENDPOINTS
 export interface ApiRuntimeConfig {
   mode: ApiMode
   baseUrl: string
+  streamBaseUrl?: string
   apiKey?: string
 }
 
@@ -41,4 +42,16 @@ export function resolveApiUrl(
     path = path.replace(`:${key}`, encodeURIComponent(value))
   }
   return `${config.baseUrl}${path}`
+}
+
+export function resolveStreamingApiUrl(
+  config: ApiRuntimeConfig,
+  endpoint: ApiEndpointName,
+  params: Record<string, string> = {}
+) {
+  let path: string = API_ENDPOINTS[endpoint].path
+  for (const [key, value] of Object.entries(params)) {
+    path = path.replace(`:${key}`, encodeURIComponent(value))
+  }
+  return `${config.streamBaseUrl || config.baseUrl}${path}`
 }

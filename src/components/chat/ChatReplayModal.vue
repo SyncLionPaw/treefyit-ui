@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { CheckCircle2, ChevronLeft, ChevronRight, CircleX, LoaderCircle, Pause, Play, Search, X } from 'lucide-vue-next'
+import { Brain, ChevronLeft, ChevronRight, Pause, Play, Search, X } from 'lucide-vue-next'
 import { useChatStore } from '../../stores/chatStore'
 import { useTreeStore } from '../../stores/treeStore'
 import { useUiStore } from '../../stores/uiStore'
-import type { ChatMessage, ChatMessagePart, ChatToolEvent } from '../../types'
+import type { ChatMessage, ChatMessagePart, ChatToolEvent, FlatNode } from '../../types'
 import { renderMarkdown } from '../../utils/markdown'
 import ChatReplayBuildGraph from './ChatReplayBuildGraph.vue'
 
@@ -17,8 +17,15 @@ const emit = defineEmits<{
 }>()
 
 type ReplayStep =
-  | { id: string; type: 'message'; role: ChatMessage['role']; content: string; sourceRef?: string }
-  | { id: string; type: 'tool'; role: 'ai'; toolEvent: ChatToolEvent; nodeId?: string }
+  | { id: string; type: 'message'; role: ChatMessage['role']; content: string; sourceRef?: string; partType?: 'text' | 'reasoning' }
+  | { id: string; type: 'tool'; role: 'ai'; toolEvent: ChatToolEvent; toolScope: ToolScope }
+
+interface ToolScope {
+  activeNodeId?: string
+  scopeNodeIds: Set<string>
+  label: string
+  detail: string
+}
 
 const chat = useChatStore()
 const tree = useTreeStore()
@@ -26,6 +33,7 @@ const ui = useUiStore()
 const activeIndex = ref(0)
 const isPlaying = ref(false)
 const replayChatEl = ref<HTMLElement | null>(null)
+const replayThinkingOpen = ref<Record<string, boolean>>({})
 let timer: ReturnType<typeof setInterval> | null = null
 
 function stopPlayback() {
@@ -59,43 +67,143 @@ function collectStrings(value: unknown): string[] {
   return []
 }
 
-function findNodeForTool(event: ChatToolEvent) {
+function findNodeByToken(nodes: FlatNode[], token: string) {
+  const normalized = token.trim().toLowerCase()
+  if (!normalized) return undefined
+  return nodes.find(node => (
+    node.id.toLowerCase() === normalized ||
+    node.path.toLowerCase() === normalized ||
+    node.title.toLowerCase() === normalized
+  ))
+}
+
+function collectPathCandidates(text: string) {
+  const candidates = new Set<string>()
+  const patterns = [
+    /(?:path["']?\s*[:=]\s*["']?|\[|children of\s+\[)(\d+(?:\.\d+)*)/gi,
+    /\b(\d+(?:\.\d+)+)\b/g,
+  ]
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      candidates.add(match[1])
+    }
+  }
+  return [...candidates]
+}
+
+function childNodesOf(nodeId: string) {
+  return tree.buildFlatNodes.filter(node => node.parentId === nodeId)
+}
+
+function descendantNodesOf(nodeId: string) {
+  const descendants: FlatNode[] = []
+  const queue = childNodesOf(nodeId)
+  while (queue.length) {
+    const node = queue.shift()
+    if (!node) continue
+    descendants.push(node)
+    queue.push(...childNodesOf(node.id))
+  }
+  return descendants
+}
+
+function nodeLabel(node?: FlatNode) {
+  return node ? `${node.path} ${node.title}` : '未识别节点'
+}
+
+function resolveToolScope(event: ChatToolEvent): ToolScope {
   const nodes = tree.buildFlatNodes
-  if (!nodes.length) return undefined
+  if (!nodes.length) {
+    return {
+      scopeNodeIds: new Set(),
+      label: '无可用知识树',
+      detail: '当前回放没有可映射的 Tree 节点。',
+    }
+  }
 
   const parsedArgs = safeParseJson(event.arguments)
   const argCandidates = [
     ...collectStrings(parsedArgs),
     event.arguments || '',
   ].map(item => item.trim()).filter(Boolean)
+  const resultText = event.result || ''
+  const toolName = event.name.toLowerCase()
+  const matchedNodes = new Map<string, FlatNode>()
+
+  function addNode(node?: FlatNode) {
+    if (node) matchedNodes.set(node.id, node)
+  }
 
   for (const candidate of argCandidates) {
-    const exact = nodes.find(node => (
-      node.id === candidate ||
-      node.path === candidate ||
-      node.title === candidate
-    ))
-    if (exact) return exact.id
+    addNode(findNodeByToken(nodes, candidate))
+    collectPathCandidates(candidate).forEach(path => addNode(findNodeByToken(nodes, path)))
   }
 
-  const resultPaths = Array.from((event.result || '').matchAll(/(?:path=|children of\s+|\[)(\d+(?:\.\d+)*)/gi))
-    .map(match => match[1])
-  for (const path of resultPaths) {
-    const exact = nodes.find(node => node.id === path || node.path === path)
-    if (exact) return exact.id
-  }
+  collectPathCandidates(resultText).forEach(path => addNode(findNodeByToken(nodes, path)))
 
   const haystack = argCandidates.join(' ').toLowerCase()
-  const byPath = [...nodes]
+  addNode([...nodes]
     .sort((a, b) => b.path.length - a.path.length)
-    .find(node => haystack.includes(node.path.toLowerCase()))
-  if (byPath) return byPath.id
+    .find(node => haystack.includes(node.path.toLowerCase())))
+  addNode(nodes.find(node => haystack.includes(node.title.toLowerCase())))
 
-  return nodes.find(node => haystack.includes(node.title.toLowerCase()))?.id
+  const activeNode = [...matchedNodes.values()][0]
+  const scopeNodeIds = new Set<string>()
+  let label = '工具范围'
+  let detail = matchedNodes.size ? `命中 ${matchedNodes.size} 个节点。` : '没有从工具参数或结果中识别到具体节点。'
+
+  if (toolName.includes('children') && activeNode) {
+    const children = childNodesOf(activeNode.id)
+    scopeNodeIds.add(activeNode.id)
+    children.forEach(node => scopeNodeIds.add(node.id))
+    label = '子节点范围'
+    detail = `${nodeLabel(activeNode)}，包含 ${children.length} 个直接子节点。`
+  } else if (toolName.includes('content') && activeNode) {
+    const descendants = descendantNodesOf(activeNode.id)
+    scopeNodeIds.add(activeNode.id)
+    descendants.forEach(node => scopeNodeIds.add(node.id))
+    label = '内容读取范围'
+    detail = `${nodeLabel(activeNode)}，覆盖当前节点${descendants.length ? `及 ${descendants.length} 个后代节点` : ''}。`
+  } else if (toolName.includes('overview')) {
+    const topNodes = nodes.filter(node => node.depth <= 1)
+    topNodes.forEach(node => scopeNodeIds.add(node.id))
+    label = '文档概览范围'
+    detail = `展示当前 Tree 的 ${topNodes.length} 个顶层节点。`
+  } else if (toolName.includes('find') || toolName.includes('search')) {
+    matchedNodes.forEach(node => scopeNodeIds.add(node.id))
+    label = '搜索命中范围'
+    detail = matchedNodes.size
+      ? `命中 ${matchedNodes.size} 个候选节点：${[...matchedNodes.values()].slice(0, 3).map(nodeLabel).join('、')}${matchedNodes.size > 3 ? '...' : ''}`
+      : detail
+  } else if (toolName.includes('catalog') || toolName.includes('forest')) {
+    const topNodes = nodes.filter(node => node.depth <= 1)
+    topNodes.forEach(node => scopeNodeIds.add(node.id))
+    label = 'Forest 概览范围'
+    detail = `展示当前可视 Tree 的 ${topNodes.length} 个顶层节点。`
+  } else {
+    matchedNodes.forEach(node => scopeNodeIds.add(node.id))
+  }
+
+  return {
+    activeNodeId: activeNode?.id,
+    scopeNodeIds,
+    label,
+    detail,
+  }
+}
+
+function isReplayThinkingExpanded(stepId: string) {
+  return replayThinkingOpen.value[stepId] ?? false
+}
+
+function updateReplayThinkingExpanded(stepId: string, event: Event) {
+  const element = event.currentTarget as HTMLDetailsElement | null
+  if (!element) return
+  replayThinkingOpen.value[stepId] = element.open
 }
 
 function stepFromPart(message: ChatMessage, part: ChatMessagePart, index: number): ReplayStep | null {
-  if (part.type === 'text') {
+  if (part.type === 'text' || part.type === 'reasoning') {
     if (!part.content.trim()) return null
     return {
       id: `${message.id}-${part.id}-${index}`,
@@ -103,6 +211,7 @@ function stepFromPart(message: ChatMessage, part: ChatMessagePart, index: number
       role: message.role,
       content: part.content,
       sourceRef: message.sourceRef,
+      partType: part.type,
     }
   }
 
@@ -111,7 +220,7 @@ function stepFromPart(message: ChatMessage, part: ChatMessagePart, index: number
     type: 'tool',
     role: 'ai',
     toolEvent: part.toolEvent,
-    nodeId: findNodeForTool(part.toolEvent),
+    toolScope: resolveToolScope(part.toolEvent),
   }
 }
 
@@ -136,10 +245,21 @@ const visibleSteps = computed(() => steps.value.slice(0, activeIndex.value + 1))
 const activeNodeId = computed(() => {
   let nodeId: string | undefined
   for (const step of visibleSteps.value) {
-    if (step.type === 'tool' && step.nodeId) nodeId = step.nodeId
+    if (step.type === 'tool' && step.toolScope.activeNodeId) nodeId = step.toolScope.activeNodeId
   }
   return nodeId
 })
+
+const activeToolStep = computed(() => {
+  for (let index = visibleSteps.value.length - 1; index >= 0; index -= 1) {
+    const step = visibleSteps.value[index]
+    if (step.type === 'tool') return step
+  }
+  return undefined
+})
+
+const activeScopeNodeIds = computed(() => activeToolStep.value?.toolScope.scopeNodeIds || new Set<string>())
+const activePulseKey = computed(() => activeToolStep.value?.id || '')
 
 const activePathIds = computed(() => {
   const ids = new Set<string>()
@@ -240,30 +360,43 @@ onBeforeUnmount(stopPlayback)
                 v-for="(step, index) in visibleSteps"
                 :key="step.id"
                 class="replay-step"
-                :class="[step.type, step.type === 'message' ? step.role : 'tool', { active: index === activeIndex }]"
+                :class="[step.type, step.type === 'message' ? [step.role, step.partType || 'text'] : 'tool', { active: index === activeIndex }]"
               >
                 <div v-if="step.type === 'message'" class="replay-bubble">
-                  <div v-html="renderMarkdown(step.content)"></div>
+                  <details
+                    v-if="step.partType === 'reasoning'"
+                    class="replay-thinking-block"
+                    :open="isReplayThinkingExpanded(step.id)"
+                    @toggle="updateReplayThinkingExpanded(step.id, $event)"
+                  >
+                    <summary class="replay-thinking-summary" aria-label="展开思考内容">
+                      <span class="replay-thinking-label" aria-hidden="true">
+                        <Brain :size="13" :stroke-width="2.1" />
+                      </span>
+                      <span class="replay-thinking-preview">{{ compactText(step.content, 72) }}</span>
+                    </summary>
+                    <div class="replay-thinking-body">
+                      <div v-html="renderMarkdown(step.content)"></div>
+                    </div>
+                  </details>
+                  <div v-else v-html="renderMarkdown(step.content)"></div>
                   <small v-if="step.sourceRef">{{ step.sourceRef }}</small>
                 </div>
                 <details v-else class="tool-events" aria-label="Agent tool calls">
                   <summary class="tool-event" :class="step.toolEvent.status">
-                    <div class="tool-icon">
-                      <LoaderCircle v-if="step.toolEvent.status === 'running'" class="spin" :size="13" :stroke-width="2.2" aria-hidden="true" />
-                      <CheckCircle2 v-else-if="step.toolEvent.status === 'done'" :size="13" :stroke-width="2.2" aria-hidden="true" />
-                      <CircleX v-else :size="13" :stroke-width="2.2" aria-hidden="true" />
-                    </div>
                     <div class="tool-body">
                       <div class="tool-title">
                         <Search :size="13" :stroke-width="2.1" aria-hidden="true" />
-                        <span>
-                          {{ step.toolEvent.status === 'running' ? 'Agent 正在使用检索工具' : step.toolEvent.status === 'done' ? '检索工具调用完成' : '检索工具调用失败' }}
-                        </span>
                         <code>{{ step.toolEvent.name }}</code>
+                        <span class="tool-scope-chip">{{ step.toolScope.label }}</span>
                       </div>
+                      <div class="tool-scope-line">{{ step.toolScope.detail }}</div>
                     </div>
                   </summary>
                   <div class="tool-details">
+                    <div class="tool-detail tool-scope-detail">
+                      范围: {{ step.toolScope.detail }}
+                    </div>
                     <div v-if="step.toolEvent.arguments" class="tool-detail">
                       参数: {{ compactText(step.toolEvent.arguments) }}
                     </div>
@@ -280,11 +413,17 @@ onBeforeUnmount(stopPlayback)
           </div>
 
           <aside class="replay-tree">
+            <div v-if="activeToolStep" class="tree-scope-card" :key="activeToolStep.id">
+              <strong>{{ activeToolStep.toolScope.label }}</strong>
+              <span>{{ activeToolStep.toolScope.detail }}</span>
+            </div>
             <div v-if="replayTrees.length" class="tree-canvas">
               <ChatReplayBuildGraph
                 :trees="replayTrees"
                 :active-node-id="activeNodeId"
                 :active-path-ids="activePathIds"
+                :scope-node-ids="activeScopeNodeIds"
+                :pulse-key="activePulseKey"
               />
             </div>
             <div v-else class="tree-empty">
@@ -421,6 +560,14 @@ onBeforeUnmount(stopPlayback)
     align-self: flex-start;
   }
 
+  &.reasoning {
+    .replay-bubble {
+      border-color: rgba(15, 23, 42, 0.08);
+      background: rgba(15, 23, 42, 0.04);
+      color: $color-text-light;
+    }
+  }
+
   &.system {
     align-self: center;
   }
@@ -428,6 +575,10 @@ onBeforeUnmount(stopPlayback)
   &.tool {
     align-self: flex-start;
     width: 88%;
+  }
+
+  &.tool.active {
+    animation: replayToolPulse 820ms ease-out;
   }
 }
 
@@ -544,15 +695,86 @@ onBeforeUnmount(stopPlayback)
   }
 }
 
+.replay-thinking-block {
+  display: block;
+}
+
+.replay-thinking-block[open] {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
+}
+
+.replay-thinking-summary {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  cursor: pointer;
+  line-height: 1;
+  list-style: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+}
+
+.replay-thinking-block[open] .replay-thinking-summary {
+  grid-template-columns: 16px;
+}
+
+.replay-thinking-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  line-height: 0;
+  color: rgba(15, 23, 42, 0.52);
+
+  :deep(svg) {
+    display: block;
+    flex: 0 0 auto;
+  }
+}
+
+.replay-thinking-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(15, 23, 42, 0.72);
+  font-size: $font-size-sm;
+  line-height: 18px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.replay-thinking-body {
+  margin-top: 6px;
+  padding-left: 24px;
+}
+
+.replay-thinking-block[open] .replay-thinking-body {
+  margin-top: 0;
+  padding-left: 0;
+}
+
+.replay-thinking-block:not([open]) .replay-thinking-body {
+  display: none;
+}
+
+.replay-thinking-block[open] .replay-thinking-preview {
+  display: none;
+}
+
 .tool-events {
   display: block;
   margin: 0;
 }
 
 .tool-event {
-  display: grid;
-  grid-template-columns: 22px 1fr;
-  gap: 8px;
+  display: block;
   padding: 6px 10px;
   border: 1px solid rgba($color-primary, 0.2);
   border-radius: $radius-control;
@@ -575,20 +797,6 @@ onBeforeUnmount(stopPlayback)
 .tool-event.error {
   border-color: rgba($color-error, 0.24);
   background: rgba($color-error, 0.07);
-}
-
-.tool-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.72);
-  color: $color-primary;
-
-  .running & { color: $color-info; }
-  .error & { color: $color-error; }
 }
 
 .tool-body {
@@ -615,6 +823,24 @@ onBeforeUnmount(stopPlayback)
   }
 }
 
+.tool-scope-chip {
+  padding: 1px 6px;
+  border: 1px solid rgba($color-primary, 0.18);
+  border-radius: 999px;
+  background: rgba($color-primary, 0.08);
+  color: $color-primary;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-semibold;
+}
+
+.tool-scope-line {
+  margin-top: 4px;
+  color: rgba($color-text, 0.72);
+  font-size: $font-size-xs;
+  line-height: $line-height-base;
+  overflow-wrap: anywhere;
+}
+
 .tool-detail {
   color: $color-text-light;
   font-size: $font-size-xs;
@@ -636,8 +862,8 @@ onBeforeUnmount(stopPlayback)
   opacity: 0.72;
 }
 
-.spin {
-  animation: spin 900ms linear infinite;
+.tool-scope-detail {
+  color: $color-primary;
 }
 
 .replay-empty,
@@ -649,6 +875,9 @@ onBeforeUnmount(stopPlayback)
 }
 
 .replay-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   min-width: 0;
   min-height: 0;
   padding: 18px;
@@ -656,9 +885,32 @@ onBeforeUnmount(stopPlayback)
 
 .tree-canvas {
   width: 100%;
-  height: 100%;
+  flex: 1;
   min-width: 0;
   min-height: 0;
+}
+
+.tree-scope-card {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid rgba($color-primary, 0.18);
+  border-radius: $radius-control;
+  background: rgba($color-primary, 0.08);
+  animation: replayScopePulse 820ms ease-out;
+
+  strong {
+    color: $color-primary;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-semibold;
+  }
+
+  span {
+    color: $color-text-light;
+    font-size: $font-size-xs;
+    line-height: $line-height-base;
+    overflow-wrap: anywhere;
+  }
 }
 
 .replay-controls {
@@ -685,6 +937,37 @@ onBeforeUnmount(stopPlayback)
     margin-left: 4px;
     color: $color-text-light;
     font-size: $font-size-xs;
+  }
+}
+
+@keyframes replayToolPulse {
+  0% {
+    filter: saturate(1);
+    transform: scale(0.98);
+  }
+
+  44% {
+    filter: saturate(1.18);
+    transform: scale(1.015);
+  }
+
+  100% {
+    filter: saturate(1);
+    transform: scale(1);
+  }
+}
+
+@keyframes replayScopePulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba($color-primary, 0.18);
+  }
+
+  48% {
+    box-shadow: 0 0 0 8px rgba($color-primary, 0.07);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba($color-primary, 0);
   }
 }
 
@@ -735,10 +1018,6 @@ onBeforeUnmount(stopPlayback)
     background: rgba(230, 57, 70, 0.1);
   }
 
-  .tool-icon {
-    background: rgba(255, 255, 255, 0.08);
-  }
-
   .tool-details {
     border-color: #2a2a2a;
     background: rgba(24, 24, 24, 0.72);
@@ -772,7 +1051,4 @@ onBeforeUnmount(stopPlayback)
   }
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
 </style>

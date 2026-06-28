@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { Database } from 'lucide-vue-next'
+import { useChatStore } from '../../stores/chatStore'
 import { useTreeStore } from '../../stores/treeStore'
 
 const tree = useTreeStore()
+const chat = useChatStore()
 </script>
 
 <template>
@@ -10,13 +12,13 @@ const tree = useTreeStore()
     <div class="icon">
       <img src="/logo-removebg-preview.png" alt="TreefyIt" class="brand-logo" />
     </div>
-    <h2 class="title">{{ tree.hasActiveBuild ? '向当前知识库提问' : tree.buildGuard.title }}</h2>
+    <h2 class="title">{{ chat.selectedKnowledgeBase ? '向当前知识库提问' : '直接开始对话' }}</h2>
     <p class="subtitle">
-      {{ tree.hasActiveBuild ? '左侧切换知识库，底部输入问题。上传和构建请前往 Build。' : tree.buildGuard.description }}
+      {{ chat.selectedKnowledgeBase ? '左侧切换知识库，或在输入框里输入 @ 选择 / 取消知识库。上传和构建请前往 Build。' : (tree.hasKnowledgeBases ? '不带知识库也可以直接聊天；输入 @ 可以临时挂载某个知识库。' : tree.buildGuard.description) }}
     </p>
-    <div v-if="tree.hasActiveBuild" class="kb-pill">
+    <div v-if="chat.selectedKnowledgeBase" class="kb-pill">
       <Database :size="15" :stroke-width="2" aria-hidden="true" />
-      <span>{{ tree.activeBuildTitle }}</span>
+      <span>{{ chat.selectedKnowledgeBase.name }}</span>
     </div>
   </div>
 </template>

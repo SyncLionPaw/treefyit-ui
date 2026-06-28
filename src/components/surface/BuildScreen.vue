@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Graph as G6Graph } from '@antv/g6'
 import {
   AlertCircle,
@@ -9,11 +9,13 @@ import {
   FileText,
   GitBranch,
   Rows3,
+  Trash2,
   Upload,
 } from 'lucide-vue-next'
 import { useApiConfigStore } from '../../stores/apiConfigStore'
 import { useTreeStore } from '../../stores/treeStore'
 import type { FlatNode } from '../../types'
+import { formatUiDateTime } from '../../utils/dateTime'
 import { renderMarkdown } from '../../utils/markdown'
 import JsonRenderer from '../common/JsonRenderer.vue'
 
@@ -32,28 +34,56 @@ const previewMode = ref<'original' | 'parsed'>('original')
 const previewText = ref('')
 const backendOriginalText = ref('')
 const previewObjectUrl = ref('')
+const deletingBuildId = ref<string | null>(null)
 const expandedDetailNodeIds = ref<Set<string>>(new Set())
 const graphContainer = ref<HTMLDivElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const buildSidebarWidth = ref(300)
+const isResizingBuildSidebar = ref(false)
 let graph: G6Graph | null = null
 let graphLoading = false
 let resizeObserver: ResizeObserver | null = null
 let hasFitGraph = false
 let graphDensityKey = ''
+let graphRenderQueue = Promise.resolve()
+let graphRendering = false
+let graphPendingDestroy = false
+let isDisposed = false
 const GRAPH_FULL_RENDER_LIMIT = 650
 const GRAPH_LOD_NODE_LIMIT = 420
+const BUILD_SIDEBAR_WIDTH_STORAGE_KEY = 'treefyit:build-sidebar-width'
+const BUILD_SIDEBAR_DEFAULT_WIDTH = 300
+const BUILD_SIDEBAR_MIN_WIDTH = 240
+const BUILD_SIDEBAR_MAX_WIDTH = 460
+const BUILD_SIDEBAR_STACK_BREAKPOINT = 960
+const BUILD_MAIN_MIN_WIDTH = 520
+const BUILD_SCREEN_HORIZONTAL_SPACE = 36
+let sidebarResizeStartX = 0
+let sidebarResizeStartWidth = BUILD_SIDEBAR_DEFAULT_WIDTH
 
 const currentStats = computed(() => tree.currentBuild?.stats)
 const shouldShowBuildProgress = computed(() => tree.isBuilding)
+const buildHistoryRows = computed(() => tree.knowledgeBases.slice(0, 5).map(kb => ({
+  ...kb,
+  updatedAtLabel: formatUiDateTime(kb.updatedAt, { preset: 'monthDayTime' }),
+  updatedAtTitle: formatUiDateTime(kb.updatedAt, { preset: 'detail' }),
+})))
+const currentBuildTimeLabel = computed(() => {
+  const createdAt = tree.currentBuild?.created_at
+  if (!createdAt) return tree.buildGuard.title
+  return formatUiDateTime(createdAt, { preset: 'compact' })
+})
+const currentBuildTimeTitle = computed(() => {
+  const createdAt = tree.currentBuild?.created_at
+  if (!createdAt) return tree.buildGuard.description
+  return formatUiDateTime(createdAt, { preset: 'detail' })
+})
 const buildStages = computed(() => [
   { key: 'uploading', label: '上传文件', tone: 'upload', done: tree.buildProgress >= 30 },
   { key: 'parsing', label: '解析内容', tone: 'parse', done: tree.buildProgress >= 64 },
   { key: 'building', label: '生成知识树', tone: 'build', done: tree.buildPhase === 'complete' },
 ])
-const currentNode = computed(() => {
-  if (!tree.selectedNodeId) return tree.buildFlatNodes[0]
-  return tree.getBuildNodeById(tree.selectedNodeId) || tree.buildFlatNodes[0]
-})
+const buildTraceRows = computed(() => tree.buildTrace.slice(-16))
 const previewFileName = computed(() => selectedFile.value?.name || tree.currentBuild?.filename || '')
 const activeOriginalFile = computed(() => (
   selectedFile.value && selectedFile.value.name === previewFileName.value ? selectedFile.value : null
@@ -76,7 +106,7 @@ const isTextOriginal = computed(() => {
     || ['md', 'markdown', 'mdx', 'txt', 'json'].includes(previewExtension.value)
 })
 const parsedSourceText = computed(() => (
-  tree.currentBuild?.raw_text || previewText.value || currentNode.value?.text || currentNode.value?.summary || ''
+  tree.currentBuild?.parsed_text || tree.currentBuild?.raw_text || previewText.value || ''
 ))
 const activePreviewText = computed(() => (
   previewMode.value === 'original' ? previewText.value || backendOriginalText.value : parsedSourceText.value
@@ -108,7 +138,6 @@ const previewKind = computed<'markdown' | 'html' | 'pdf' | 'text' | 'missing-ori
     if (isTextOriginal.value) return 'text'
     return 'text'
   }
-  if (!parsedSourceText.value) return 'empty'
   if (isMarkdownPreview.value) return 'markdown'
   return 'text'
 })
@@ -116,6 +145,64 @@ const previewMarkdownHtml = computed(() => renderMarkdown(activePreviewText.valu
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
+}
+
+function getMaxBuildSidebarWidth() {
+  if (typeof window === 'undefined') return BUILD_SIDEBAR_MAX_WIDTH
+  const availableWidth = window.innerWidth - BUILD_SCREEN_HORIZONTAL_SPACE - BUILD_MAIN_MIN_WIDTH
+  return Math.max(BUILD_SIDEBAR_MIN_WIDTH, Math.min(BUILD_SIDEBAR_MAX_WIDTH, availableWidth))
+}
+
+function setBuildSidebarWidth(width: number) {
+  buildSidebarWidth.value = clamp(width, BUILD_SIDEBAR_MIN_WIDTH, getMaxBuildSidebarWidth())
+}
+
+function syncBuildSidebarWidth() {
+  setBuildSidebarWidth(buildSidebarWidth.value)
+}
+
+function saveBuildSidebarWidth() {
+  window.localStorage.setItem(BUILD_SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(buildSidebarWidth.value)))
+}
+
+function resizeBuildSidebar(event: PointerEvent) {
+  if (!isResizingBuildSidebar.value) return
+  const deltaX = event.clientX - sidebarResizeStartX
+  setBuildSidebarWidth(sidebarResizeStartWidth + deltaX)
+}
+
+function stopBuildSidebarResize() {
+  if (!isResizingBuildSidebar.value) return
+  isResizingBuildSidebar.value = false
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('pointermove', resizeBuildSidebar)
+  window.removeEventListener('pointerup', stopBuildSidebarResize)
+  window.removeEventListener('pointercancel', stopBuildSidebarResize)
+  saveBuildSidebarWidth()
+}
+
+function startBuildSidebarResize(event: PointerEvent) {
+  if (window.innerWidth <= BUILD_SIDEBAR_STACK_BREAKPOINT) return
+  sidebarResizeStartX = event.clientX
+  sidebarResizeStartWidth = buildSidebarWidth.value
+  isResizingBuildSidebar.value = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  event.preventDefault()
+  window.addEventListener('pointermove', resizeBuildSidebar)
+  window.addEventListener('pointerup', stopBuildSidebarResize)
+  window.addEventListener('pointercancel', stopBuildSidebarResize)
+}
+
+function adjustBuildSidebarWidth(delta: number) {
+  setBuildSidebarWidth(buildSidebarWidth.value + delta)
+  saveBuildSidebarWidth()
+}
+
+function formatTraceElapsed(elapsedSec?: number) {
+  if (typeof elapsedSec !== 'number') return '--'
+  return `${elapsedSec < 10 ? elapsedSec.toFixed(3) : elapsedSec.toFixed(1)}s`
 }
 
 const graphDensity = computed(() => {
@@ -243,10 +330,10 @@ function selectTab(tab: BuildTab) {
 }
 
 async function createGraph() {
-  if (!graphContainer.value || graph || graphLoading) return
+  if (isDisposed || !graphContainer.value || graph || graphLoading) return
   graphLoading = true
   const { Graph } = await import('@antv/g6')
-  if (!graphContainer.value) {
+  if (isDisposed || !graphContainer.value) {
     graphLoading = false
     return
   }
@@ -303,24 +390,57 @@ async function createGraph() {
   graphLoading = false
 }
 
+function isGraphDestroyed(target: G6Graph | null) {
+  return Boolean((target as unknown as { destroyed?: boolean } | null)?.destroyed)
+}
+
+function destroyGraph() {
+  if (!graph) return
+  if (graphRendering) {
+    graphPendingDestroy = true
+    return
+  }
+  graph.destroy()
+  graph = null
+  graphLoading = false
+  graphDensityKey = ''
+  hasFitGraph = false
+}
+
 function renderGraph() {
-  if (activeTab.value !== 'diagram') return
-  void nextTick(async () => {
+  graphRenderQueue = graphRenderQueue
+    .catch(() => undefined)
+    .then(renderGraphNow)
+}
+
+async function renderGraphNow() {
+  await nextTick()
+  if (isDisposed || activeTab.value !== 'diagram' || !graphContainer.value) return
+  try {
     if (graph && graphDensityKey !== graphDensity.value.key) {
-      graph.destroy()
-      graph = null
-      hasFitGraph = false
+      destroyGraph()
     }
     await createGraph()
+    if (isDisposed || activeTab.value !== 'diagram' || !graphContainer.value || !graph) return
     graphDensityKey = graphDensity.value.key
     const shouldFit = !hasFitGraph
-    graph?.setData(graphData.value)
-    await graph?.render()
-    if (shouldFit) {
-      await graph?.fitView()
+    const currentGraph = graph
+    graphRendering = true
+    currentGraph.setData(graphData.value)
+    await currentGraph.render()
+    if (!isDisposed && graph === currentGraph && !isGraphDestroyed(currentGraph) && shouldFit) {
+      await currentGraph.fitView()
       hasFitGraph = true
     }
-  })
+  } catch (error) {
+    if (!isDisposed) console.error(error)
+  } finally {
+    graphRendering = false
+    if (graphPendingDestroy || isDisposed) {
+      graphPendingDestroy = false
+      destroyGraph()
+    }
+  }
 }
 
 function startDrag(event: DragEvent) {
@@ -401,6 +521,16 @@ async function buildSelectedFile() {
   })
 }
 
+async function removeBuild(kb: typeof buildHistoryRows.value[number]) {
+  if (deletingBuildId.value) return
+  const confirmed = window.confirm(`删除 Tree「${kb.name}」？这个操作会删除对应的构建记录、索引和原始文件。`)
+  if (!confirmed) return
+
+  deletingBuildId.value = kb.id
+  await tree.deleteKnowledgeBase(kb.id)
+  deletingBuildId.value = null
+}
+
 watch(() => tree.currentBuild?.id, () => {
   hasFitGraph = false
   expandedDetailNodeIds.value = new Set(
@@ -434,23 +564,52 @@ watch([activeTab, graphData, showLabels], renderGraph, { immediate: true, deep: 
 watch(graphContainer, (container) => {
   resizeObserver?.disconnect()
   if (!container) return
-  resizeObserver = new ResizeObserver(() => graph?.resize())
+  resizeObserver = new ResizeObserver(() => {
+    if (!graphRendering && graph && !isGraphDestroyed(graph)) graph.resize()
+  })
   resizeObserver.observe(container)
   renderGraph()
 })
 
+onMounted(() => {
+  const savedWidth = Number(window.localStorage.getItem(BUILD_SIDEBAR_WIDTH_STORAGE_KEY))
+  if (Number.isFinite(savedWidth) && savedWidth > 0) {
+    setBuildSidebarWidth(savedWidth)
+  }
+  window.addEventListener('resize', syncBuildSidebarWidth)
+})
+
 onBeforeUnmount(() => {
+  isDisposed = true
+  window.removeEventListener('resize', syncBuildSidebarWidth)
+  stopBuildSidebarResize()
   resizeObserver?.disconnect()
   if (previewObjectUrl.value) URL.revokeObjectURL(previewObjectUrl.value)
-  graph?.destroy()
-  graph = null
+  destroyGraph()
 })
 </script>
 
 <template>
-  <div class="build-screen">
+  <div
+    class="build-screen"
+    :class="{ resizing: isResizingBuildSidebar }"
+    :style="{ '--build-sidebar-width': `${buildSidebarWidth}px` }"
+  >
     <aside class="build-sidebar">
       <div class="build-sidebar-head">Build Console</div>
+      <div
+        class="build-sidebar-resizer"
+        role="separator"
+        aria-label="调整 Build Console 宽度"
+        aria-orientation="vertical"
+        :aria-valuemin="BUILD_SIDEBAR_MIN_WIDTH"
+        :aria-valuemax="getMaxBuildSidebarWidth()"
+        :aria-valuenow="Math.round(buildSidebarWidth)"
+        tabindex="0"
+        @pointerdown="startBuildSidebarResize"
+        @keydown.left.prevent="adjustBuildSidebarWidth(-24)"
+        @keydown.right.prevent="adjustBuildSidebarWidth(24)"
+      ></div>
         <button
           class="dropzone"
           :class="{ dragover: isDragOver }"
@@ -495,6 +654,47 @@ onBeforeUnmount(() => {
             ></span>
             </div>
           </div>
+          <div v-if="tree.buildTasks.length" class="build-task-list" aria-label="Build task progress">
+            <div
+              v-for="task in tree.buildTasks"
+              :key="task.task"
+              class="build-task-row"
+              :class="task.status"
+            >
+              <span class="build-task-status" aria-hidden="true"></span>
+              <span class="build-task-main">
+                <strong>{{ task.task }}</strong>
+                <small>{{ task.description }}</small>
+                <em v-if="task.depends_on.length">依赖 {{ task.depends_on.join(', ') }}</em>
+              </span>
+              <span class="build-task-meta">
+                {{ task.status === 'pending' ? '等待' : task.status === 'running' ? '运行中' : task.status === 'done' ? '完成' : '失败' }}
+                <small v-if="typeof task.elapsed_ms === 'number'">{{ Math.round(task.elapsed_ms) }}ms</small>
+              </span>
+            </div>
+          </div>
+          <details v-if="buildTraceRows.length" class="build-trace-panel" open>
+            <summary>
+              <span>Trace</span>
+              <small>{{ buildTraceRows.length }} events</small>
+            </summary>
+            <ol class="build-trace-list" aria-label="Build trace timeline">
+              <li
+                v-for="event in buildTraceRows"
+                :key="event.id"
+                class="build-trace-row"
+                :class="[event.type, event.status]"
+              >
+                <code>#{{ event.seq }}</code>
+                <span class="build-trace-time">{{ formatTraceElapsed(event.elapsed_sec) }}</span>
+                <span class="build-trace-main">
+                  <strong>{{ event.task || event.stage }}</strong>
+                  <small>{{ event.message }}</small>
+                </span>
+                <span class="build-trace-type">{{ event.type }}</span>
+              </li>
+            </ol>
+          </details>
         </section>
         <button v-else class="build-button" :disabled="!selectedFile" @click="buildSelectedFile">
           {{ selectedFile ? 'Build Tree' : 'Select a file' }}
@@ -518,17 +718,31 @@ onBeforeUnmount(() => {
               {{ tree.historyGuard.title }}
               <small>{{ tree.historyGuard.description }}</small>
             </p>
-            <button
-              v-for="kb in tree.knowledgeBases.slice(0, 5)"
+            <div
+              v-for="kb in buildHistoryRows"
               :key="kb.id"
-              class="history-item"
-              :class="{ active: kb.id === tree.activeKnowledgeBaseId }"
-              @click="tree.setActiveKnowledgeBase(kb.id)"
+              class="history-row"
             >
-              <span class="history-name">{{ kb.name }}</span>
-              <span class="nodes-badge">{{ kb.nodeCount }} nodes</span>
-              <span class="history-mode">{{ kb.updatedAt }}</span>
-            </button>
+              <button
+                class="history-item"
+                :class="{ active: kb.id === tree.activeKnowledgeBaseId }"
+                @click="tree.setActiveKnowledgeBase(kb.id)"
+              >
+                <span class="history-name">{{ kb.name }}</span>
+                <span class="nodes-badge">{{ kb.nodeCount }} nodes</span>
+                <span class="history-mode" :title="kb.updatedAtTitle">{{ kb.updatedAtLabel }}</span>
+              </button>
+              <button
+                class="history-delete"
+                type="button"
+                :disabled="deletingBuildId === kb.id"
+                :aria-label="`删除 Tree ${kb.name}`"
+                :title="`删除 ${kb.name}`"
+                @click.stop="removeBuild(kb)"
+              >
+                <Trash2 :size="12" :stroke-width="2.2" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </section>
     </aside>
@@ -557,7 +771,7 @@ onBeforeUnmount(() => {
           <span>{{ currentStats?.input_tokens || 0 }} in</span>
           <span>{{ currentStats?.output_tokens || 0 }} out</span>
         </div>
-        <span class="file-time">{{ tree.currentBuild?.created_at || tree.buildGuard.title }}</span>
+        <span class="file-time" :title="currentBuildTimeTitle">{{ currentBuildTimeLabel }}</span>
         <div
           v-if="activeTab === 'preview' && (previewFileName || parsedSourceText)"
           class="preview-mode-toggle"
@@ -634,7 +848,7 @@ onBeforeUnmount(() => {
               <iframe
                 class="preview-frame"
                 title="HTML preview"
-                sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
                 :src="originalPreviewUrl"
               ></iframe>
             </div>
@@ -678,10 +892,21 @@ $bg: $color-surface-bg;
   padding: $space-screen;
   background: $bg;
   color: $text-dark;
+
+  &.resizing {
+    cursor: col-resize;
+
+    * {
+      user-select: none;
+    }
+  }
 }
 
 .build-sidebar {
-  width: $build-sidebar-width;
+  position: relative;
+  width: var(--build-sidebar-width, #{$build-sidebar-width});
+  min-width: 240px;
+  max-width: 460px;
   height: 100%;
   padding: 10px;
   border: 1px solid $border;
@@ -690,6 +915,40 @@ $bg: $color-surface-bg;
   box-shadow: $shadow-control;
   flex-shrink: 0;
   overflow: hidden;
+}
+
+.build-sidebar-resizer {
+  position: absolute;
+  top: 12px;
+  right: -8px;
+  bottom: 12px;
+  z-index: 3;
+  width: 16px;
+  cursor: col-resize;
+  touch-action: none;
+
+  &::after {
+    position: absolute;
+    top: 50%;
+    left: 7px;
+    width: 2px;
+    height: 42px;
+    border-radius: 999px;
+    background: rgba($color-border, 0.95);
+    content: '';
+    transform: translateY(-50%);
+    transition: background $transition-fast, box-shadow $transition-fast;
+  }
+
+  &:hover::after,
+  &:focus-visible::after {
+    background: rgba($plant, 0.58);
+    box-shadow: 0 0 0 3px rgba($plant, 0.1);
+  }
+
+  &:focus-visible {
+    outline: none;
+  }
 }
 
 .build-sidebar-head {
@@ -937,6 +1196,207 @@ $bg: $color-surface-bg;
   line-height: 1;
 }
 
+.build-task-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.build-task-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba($border, 0.82);
+  border-radius: $radius-control;
+  background: rgba(255, 255, 255, 0.64);
+  color: $muted;
+  font-size: $font-size-xs;
+
+  &.running {
+    border-color: rgba(245, 158, 11, 0.22);
+    background: rgba(245, 158, 11, 0.08);
+
+    .build-task-status {
+      background: #f59e0b;
+      animation: taskPulse 960ms ease-in-out infinite;
+    }
+  }
+
+  &.done {
+    border-color: rgba(34, 197, 94, 0.18);
+
+    .build-task-status {
+      background: #22c55e;
+    }
+  }
+
+  &.error {
+    border-color: rgba($color-error, 0.24);
+    background: rgba($color-error, 0.07);
+
+    .build-task-status {
+      background: $color-error;
+    }
+  }
+}
+
+.build-task-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba($muted, 0.38);
+}
+
+.build-task-main {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+
+  strong,
+  small,
+  em {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: $text-dark;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-semibold;
+  }
+
+  small,
+  em {
+    color: $muted;
+    font-size: 10px;
+    font-style: normal;
+  }
+}
+
+.build-task-meta {
+  display: grid;
+  justify-items: end;
+  gap: 1px;
+  color: $muted;
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+
+  small {
+    color: rgba($muted, 0.78);
+    font-size: 10px;
+  }
+}
+
+.build-trace-panel {
+  margin-top: 10px;
+  border: 1px solid rgba($border, 0.72);
+  border-radius: $radius-control;
+  background: rgba(255, 255, 255, 0.54);
+
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 8px;
+    color: $text-dark;
+    cursor: pointer;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-semibold;
+    list-style: none;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    small {
+      color: $muted;
+      font-size: 10px;
+      font-weight: $font-weight-medium;
+    }
+  }
+}
+
+.build-trace-list {
+  display: grid;
+  gap: 0;
+  max-height: 180px;
+  margin: 0;
+  padding: 0 8px 8px;
+  overflow: auto;
+  list-style: none;
+}
+
+.build-trace-row {
+  display: grid;
+  grid-template-columns: 34px 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  border-top: 1px solid rgba($border, 0.58);
+  color: $muted;
+  font-size: 10px;
+
+  &.done,
+  &.progress.done {
+    .build-trace-type {
+      color: #16a34a;
+    }
+  }
+
+  &.error,
+  &.task_error {
+    .build-trace-type {
+      color: $color-error;
+    }
+  }
+
+  code {
+    color: rgba($muted, 0.82);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+  }
+}
+
+.build-trace-time,
+.build-trace-type {
+  white-space: nowrap;
+}
+
+.build-trace-main {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+
+  strong,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: $text-dark;
+    font-size: 10px;
+    font-weight: $font-weight-semibold;
+  }
+
+  small {
+    color: $muted;
+    font-size: 10px;
+  }
+}
+
+.build-trace-type {
+  color: rgba($muted, 0.82);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+}
+
 .stage-dots {
   display: inline-flex;
   align-items: center;
@@ -1066,12 +1526,20 @@ $bg: $color-surface-bg;
   }
 }
 
+.history-row {
+  position: relative;
+}
+
 .history-item {
   display: grid;
   grid-template-columns: 1fr auto auto;
   align-items: center;
   gap: 7px;
-  padding: 11px 10px;
+  width: 100%;
+  padding-right: 38px;
+  padding-top: 11px;
+  padding-bottom: 11px;
+  padding-left: 10px;
   border: 1px solid $border;
   border-radius: $radius-control;
   background: #fff;
@@ -1083,6 +1551,34 @@ $bg: $color-surface-bg;
   &:hover {
     border-color: rgba($plant, 0.28);
     background: #fbfdfb;
+  }
+}
+
+.history-delete {
+  position: absolute;
+  top: 9px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid $border;
+  border-radius: 999px;
+  background: #fff;
+  color: $muted;
+  cursor: pointer;
+  transition: border-color $transition-fast, background $transition-fast, color $transition-fast;
+
+  &:hover:not(:disabled) {
+    border-color: rgba($plant, 0.28);
+    color: $plant;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.62;
   }
 }
 
@@ -1504,8 +2000,12 @@ $bg: $color-surface-bg;
   }
 
   :deep(img) {
+    display: block;
     max-width: 100%;
     height: auto;
+    max-height: 70vh;
+    object-fit: contain;
+    border-radius: $radius-control;
   }
 }
 
@@ -1564,7 +2064,111 @@ $bg: $color-surface-bg;
   color: $text-dark;
 }
 
+@media (max-width: 1100px) {
+  .build-screen {
+    gap: 12px;
+    padding: 12px;
+  }
+}
+
+@media (max-width: 960px) {
+  .build-screen {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .build-sidebar {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: auto;
+  }
+
+  .build-sidebar-resizer {
+    display: none;
+  }
+
+  .build-main {
+    min-height: 0;
+  }
+
+  .file-summary {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    min-height: auto;
+    row-gap: 10px;
+  }
+
+  .file-title {
+    flex: 1 1 100%;
+  }
+
+  .file-stats {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow-x: visible;
+  }
+
+  .file-time {
+    margin-left: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .preview-mode-toggle {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .build-screen {
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .result-tabs {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 6px 12px;
+  }
+
+  .result-tabs button {
+    min-width: 0;
+    flex: 1 1 calc(50% - 8px);
+    justify-content: center;
+  }
+
+  .file-summary {
+    gap: 8px 10px;
+    padding: 10px 14px;
+  }
+
+  .file-stats span {
+    height: 22px;
+    padding: 0 8px;
+  }
+
+  .preview-mode-toggle {
+    width: 100%;
+  }
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@keyframes taskPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.2);
+  }
+
+  50% {
+    box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+  }
 }
 </style>

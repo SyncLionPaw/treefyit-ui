@@ -4,7 +4,7 @@ import type { KnowledgeBase, TreeNode, FlatNode, SourceFile } from '../types'
 import { flattenTree, assignPaths } from '../utils/treeUtils'
 import { sourceToColor } from '../utils/colorPalette'
 import { useApiConfigStore } from './apiConfigStore'
-import { resolveApiUrl } from '../services/apiClient'
+import { resolveApiUrl, resolveStreamingApiUrl } from '../services/apiClient'
 
 export interface BuildStats {
   input_tokens?: number
@@ -29,6 +29,7 @@ export interface BuildRecord {
   has_original_file?: boolean
   original_file_url?: string | null
   raw_text?: string
+  parsed_text?: string
   mermaid?: string
   tree?: TreeNode[] | TreeNode
   stats?: BuildStats
@@ -42,6 +43,37 @@ export interface BuildRecord {
 
 export type BuildPhase = 'idle' | 'uploading' | 'parsing' | 'building' | 'complete' | 'error'
 export type DataGuardStatus = 'loading' | 'error' | 'empty' | 'ready'
+export type BuildTaskStatus = 'pending' | 'running' | 'done' | 'error'
+
+export interface BuildTaskProgress {
+  task: string
+  stage: string
+  description: string
+  depends_on: string[]
+  status: BuildTaskStatus
+  elapsed_ms?: number
+  message?: string
+  updated_at: string
+}
+
+export interface BuildTraceEvent {
+  id: string
+  seq: number
+  type: string
+  stage: string
+  task?: string
+  status?: string
+  message: string
+  elapsed_sec?: number
+  timestamp?: string
+}
+
+type BuildStreamMeta = {
+  request_id?: string
+  trace_seq?: number
+  timestamp?: string
+  elapsed_sec?: number
+}
 
 type BuildStreamStage =
   | 'start'
@@ -64,12 +96,15 @@ type BuildStreamStage =
   | 'done'
   | 'error'
 
-type BuildStreamEvent =
-  | { type: 'start'; stage?: BuildStreamStage | string; bid?: string; filename?: string; summarize?: boolean; file_size?: number; elapsed_sec?: number }
-  | { type: 'progress'; stage?: BuildStreamStage | string; message?: string; progress?: number; done?: number; total?: number; chars?: number; nodes?: number; root_nodes?: number; node_count?: number; ok?: boolean; score?: number; elapsed_sec?: number }
-  | { type: 'warning'; message?: string; stage?: BuildStreamStage | string; elapsed_sec?: number }
-  | { type: 'done'; stage?: BuildStreamStage | string; cached?: boolean; result?: BuildRecord; elapsed_sec?: number }
-  | { type: 'error'; stage?: BuildStreamStage | string; message?: string; result?: BuildRecord; elapsed_sec?: number }
+type BuildStreamEvent = BuildStreamMeta & (
+  | { type: 'start'; stage?: BuildStreamStage | string; bid?: string; filename?: string; summarize?: boolean; file_size?: number }
+  | { type: 'task_plan'; stage?: string; tasks?: Array<Partial<BuildTaskProgress>> }
+  | { type: 'progress'; stage?: BuildStreamStage | string; task?: string; status?: BuildTaskStatus; description?: string; depends_on?: string[]; elapsed_ms?: number; message?: string; progress?: number; done?: number; total?: number; chars?: number; nodes?: number; root_nodes?: number; node_count?: number; ok?: boolean; score?: number }
+  | { type: 'warning'; message?: string; stage?: BuildStreamStage | string }
+  | { type: 'done'; stage?: BuildStreamStage | string; cached?: boolean; result?: BuildRecord }
+  | { type: 'task_error'; stage?: string; task?: string; status?: BuildTaskStatus; description?: string; depends_on?: string[]; elapsed_ms?: number; message?: string }
+  | { type: 'error'; stage?: BuildStreamStage | string; message?: string; result?: BuildRecord }
+)
 
 export interface DataGuard {
   status: DataGuardStatus
@@ -95,6 +130,9 @@ interface BuildStageConfig {
 }
 
 const BUILD_STAGE_PROGRESS: Record<string, BuildStageConfig> = {
+  prepare: { phase: 'uploading', base: 8, span: 18, label: '准备构建参数' },
+  build: { phase: 'building', base: 28, span: 58, label: '解析文档并生成知识树' },
+  finalize: { phase: 'building', base: 86, span: 10, label: '保存构建结果和原始文件' },
   save_original: { phase: 'uploading', base: 10, span: 10, label: '保存原件中' },
   save_original_done: { phase: 'uploading', base: 20, span: 4, label: '原件已保存', done: true },
   parse: { phase: 'parsing', base: 28, span: 12, label: '读取并解析文档' },
@@ -231,6 +269,8 @@ export const useTreeStore = defineStore('tree', () => {
   const buildPhase = ref<BuildPhase>('idle')
   const buildProgress = ref(0)
   const buildProgressMessage = ref('')
+  const buildTasks = ref<BuildTaskProgress[]>([])
+  const buildTrace = ref<BuildTraceEvent[]>([])
   const error = ref<string | null>(null)
   let buildProgressTimer: ReturnType<typeof setInterval> | null = null
 
@@ -387,6 +427,81 @@ export const useTreeStore = defineStore('tree', () => {
     buildProgress.value = Math.max(0, Math.min(100, progress))
   }
 
+  function normalizeBuildTask(rawTask: Partial<BuildTaskProgress>): BuildTaskProgress {
+    const task = rawTask.task || rawTask.stage || 'task'
+    return {
+      task,
+      stage: rawTask.stage || task,
+      description: rawTask.description || rawTask.message || task,
+      depends_on: rawTask.depends_on || [],
+      status: rawTask.status || 'pending',
+      elapsed_ms: rawTask.elapsed_ms,
+      message: rawTask.message,
+      updated_at: new Date().toISOString(),
+    }
+  }
+
+  function applyBuildTaskPlan(tasks: Array<Partial<BuildTaskProgress>>) {
+    buildTasks.value = tasks.map(normalizeBuildTask)
+  }
+
+  function applyBuildTaskEvent(event: Extract<BuildStreamEvent, { type: 'progress' | 'task_error' }>) {
+    const taskName = event.task || event.stage || 'task'
+    const nextTask = normalizeBuildTask({
+      task: taskName,
+      stage: event.stage || taskName,
+      description: event.description || event.message || taskName,
+      depends_on: event.depends_on || [],
+      status: event.status || (event.type === 'task_error' ? 'error' : 'running'),
+      elapsed_ms: event.elapsed_ms,
+      message: event.message,
+    })
+    const index = buildTasks.value.findIndex(task => task.task === taskName)
+    if (index >= 0) {
+      buildTasks.value = buildTasks.value.map((task, taskIndex) => (
+        taskIndex === index
+          ? {
+            ...task,
+            ...nextTask,
+            description: nextTask.description || task.description,
+            depends_on: nextTask.depends_on.length ? nextTask.depends_on : task.depends_on,
+          }
+          : task
+      ))
+      return
+    }
+    buildTasks.value = [...buildTasks.value, nextTask]
+  }
+
+  function buildTraceMessage(event: BuildStreamEvent) {
+    if (event.type === 'start') return `开始构建 ${event.filename || ''}`.trim()
+    if (event.type === 'task_plan') return `任务计划已生成 · ${event.tasks?.length || 0} tasks`
+    if (event.type === 'progress') return event.message || event.description || event.task || event.stage || '构建进度更新'
+    if (event.type === 'warning') return event.message || '构建警告'
+    if (event.type === 'task_error') return event.message || event.description || event.task || '任务失败'
+    if (event.type === 'done') return event.cached ? '命中缓存，构建完成' : '构建完成'
+    if (event.type === 'error') return event.message || '构建失败'
+    return '构建事件'
+  }
+
+  function appendBuildTraceEvent(event: BuildStreamEvent) {
+    const seq = event.trace_seq || buildTrace.value.length + 1
+    buildTrace.value = [
+      ...buildTrace.value,
+      {
+        id: `${event.request_id || 'build'}-${seq}`,
+        seq,
+        type: event.type,
+        stage: String(event.stage || event.type),
+        task: 'task' in event ? event.task : undefined,
+        status: 'status' in event ? event.status : undefined,
+        message: buildTraceMessage(event),
+        elapsed_sec: event.elapsed_sec,
+        timestamp: event.timestamp,
+      },
+    ].slice(-120)
+  }
+
   function buildFormData(file: File, options: { summarize: boolean }) {
     const formData = new FormData()
     formData.append('file', file)
@@ -404,6 +519,13 @@ export const useTreeStore = defineStore('tree', () => {
   }
 
   function buildProgressLabel(event: Extract<BuildStreamEvent, { type: 'progress' }>, config: BuildStageConfig) {
+    if (event.task && event.status === 'running') {
+      return `${event.description || event.task} · 运行中`
+    }
+    if (event.task && event.status === 'done') {
+      const elapsed = typeof event.elapsed_ms === 'number' ? ` · ${Math.round(event.elapsed_ms)}ms` : ''
+      return `${event.description || event.task} · 完成${elapsed}`
+    }
     if (event.stage === 'parse_done' && typeof event.chars === 'number') {
       return `文档解析完成 · ${event.chars.toLocaleString()} chars`
     }
@@ -439,6 +561,8 @@ export const useTreeStore = defineStore('tree', () => {
   }
 
   function applyBuildStreamEvent(event: BuildStreamEvent, fileName: string) {
+    appendBuildTraceEvent(event)
+
     if (event.type === 'start') {
       buildProgressMessage.value = '构建任务已启动'
       setBuildProgress('uploading', 8)
@@ -446,11 +570,25 @@ export const useTreeStore = defineStore('tree', () => {
       return
     }
 
+    if (event.type === 'task_plan') {
+      applyBuildTaskPlan(event.tasks || [])
+      return
+    }
+
     if (event.type === 'progress') {
+      if (event.task) applyBuildTaskEvent(event)
       const next = progressFromStreamEvent(event)
       buildProgressMessage.value = next.label
       setBuildProgress(next.phase, Math.max(buildProgress.value, next.progress))
       updateSourceProgress(fileName, buildProgress.value)
+      return
+    }
+
+    if (event.type === 'task_error') {
+      applyBuildTaskEvent(event)
+      buildProgressMessage.value = event.message || '构建任务失败'
+      setBuildProgress('error', buildProgress.value)
+      updateSourceProgress(fileName, buildProgress.value, 'error')
       return
     }
 
@@ -470,6 +608,9 @@ export const useTreeStore = defineStore('tree', () => {
     if (event.type === 'done') {
       if (!event.result) throw new Error('Build stream done event missing result')
       buildProgressMessage.value = '构建完成'
+      buildTasks.value = buildTasks.value.map(task => (
+        task.status === 'running' ? { ...task, status: 'done', updated_at: new Date().toISOString() } : task
+      ))
       const record = normalizeBuildRecord(event.result)
       if (hasFullTree(record)) {
         applyBuild(record)
@@ -603,15 +744,54 @@ export const useTreeStore = defineStore('tree', () => {
     }
   }
 
+  async function deleteKnowledgeBase(id: string) {
+    const apiConfig = useApiConfigStore()
+    error.value = null
+    try {
+      const response = await fetch(resolveApiUrl(apiConfig, 'deleteBuild', { bid: id }), {
+        method: 'DELETE',
+      })
+      if (!response.ok) throw new Error(`Delete build request failed: ${response.status}`)
+
+      knowledgeBases.value = knowledgeBases.value.filter(kb => kb.id !== id)
+      const remainingRecords = { ...buildRecords.value }
+      delete remainingRecords[id]
+      buildRecords.value = remainingRecords
+
+      if (activeKnowledgeBaseId.value !== id && currentBuild.value?.id !== id) {
+        return true
+      }
+
+      const nextKnowledgeBase = knowledgeBases.value[0]
+      selectedNodeId.value = null
+      if (nextKnowledgeBase) {
+        await loadBuild(nextKnowledgeBase.id)
+      } else {
+        currentBuild.value = null
+        activeKnowledgeBaseId.value = ''
+        trees.value = []
+        sourceFiles.value = []
+        setBuildProgress('idle', 0)
+        buildProgressMessage.value = ''
+      }
+      return true
+    } catch (err) {
+      error.value = formatApiError(err, '删除知识库', apiConfig.displayBaseUrl)
+      return false
+    }
+  }
+
   async function buildFromFile(file: File, options: { summarize: boolean }) {
     const apiConfig = useApiConfigStore()
     isBuilding.value = true
     error.value = null
     buildProgressMessage.value = '准备上传文件'
+    buildTasks.value = []
+    buildTrace.value = []
     setBuildProgress('uploading', 4)
     sourceFiles.value = [{ name: file.name, status: 'uploading', nodeCount: 0, parseProgress: 4 }]
     try {
-      const response = await fetch(resolveApiUrl(apiConfig, 'buildTreeStream'), {
+      const response = await fetch(resolveStreamingApiUrl(apiConfig, 'buildTreeStream'), {
         method: 'POST',
         body: buildFormData(file, options),
       })
@@ -660,9 +840,12 @@ export const useTreeStore = defineStore('tree', () => {
       if (!completed) throw new Error('Build stream ended before done event')
       if (completedBuildId) await loadBuild(completedBuildId)
     } catch (err) {
-      error.value = formatApiError(err, '构建知识树', apiConfig.displayBaseUrl)
+      error.value = formatApiError(err, '构建知识树', apiConfig.displayStreamBaseUrl)
       buildProgressMessage.value = '构建失败'
       setBuildProgress('error', 0)
+      buildTasks.value = buildTasks.value.map(task => (
+        task.status === 'running' ? { ...task, status: 'error', updated_at: new Date().toISOString() } : task
+      ))
       sourceFiles.value = [{ name: file.name, status: 'error', nodeCount: 0, parseProgress: 0 }]
     } finally {
       stopBuildProgressTimer()
@@ -673,6 +856,8 @@ export const useTreeStore = defineStore('tree', () => {
   async function buildFromFileLegacy(file: File, options: { summarize: boolean }) {
     const apiConfig = useApiConfigStore()
     buildProgressMessage.value = ''
+    buildTasks.value = []
+    buildTrace.value = []
     setBuildProgress('uploading', 12)
     sourceFiles.value = [{ name: file.name, status: 'uploading', nodeCount: 0, parseProgress: 12 }]
     startBuildProgressTimer()
@@ -718,12 +903,13 @@ export const useTreeStore = defineStore('tree', () => {
   return {
     trees, sourceFiles, selectedNodeId, activeKnowledgeBaseId, knowledgeBases,
     buildRecords, currentBuild, isLoadingHistory, isBuilding, buildPhase, buildProgress, buildPhaseLabel, error,
+    buildTasks, buildTrace,
     enrichedTrees, flatNodes, links, sourceColorMap, activeKnowledgeBase,
     buildTrees, buildFlatNodes, buildLinks, forestTrees, forestFlatNodes, forestLinks,
     totalNodes, totalTokens, sources,
     hasKnowledgeBases, hasActiveBuild, hasBuildTree,
     activeBuildTitle, activeBuildDescription, activeBuildNodeCount,
     historyGuard, buildGuard,
-    loadHistory, loadBuild, buildFromFile, selectNode, setActiveKnowledgeBase, getNodeById, getBuildNodeById, getForestNodeById,
+    loadHistory, loadBuild, buildFromFile, deleteKnowledgeBase, selectNode, setActiveKnowledgeBase, getNodeById, getBuildNodeById, getForestNodeById,
   }
 })

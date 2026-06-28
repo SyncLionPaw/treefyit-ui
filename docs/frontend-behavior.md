@@ -95,6 +95,49 @@ Chat 气泡和 Preview Markdown 共用 `src/utils/markdown.ts`。
 - 点击某个会话时调用 `GET /api/sessions/{session_id}/turns?limit=200`，将后端 `user / assistant` turns 还原成当前主消息流；assistant turn 的 `tool_calls / tool_results` 还原成工具块，供 Replay 继续解析。
 - 删除会话调用 `DELETE /api/sessions/{session_id}`；如果删除的是当前会话，前端清空当前消息并重置 `currentSessionId`。
 
+### Sidebar Docking
+
+Chat 左侧栏的收缩由 `ui.isChatKnowledgeDocked` 统一控制。该状态只影响 Chat 页面，不影响 Build 或 Query 页面。
+
+触发和执行流程：
+
+```mermaid
+flowchart TD
+  A[ChatInput 触发 active-change] --> B[ChatScreen 调用 ui.setChatKnowledgeDocked(active)]
+  B --> C[ui.isChatKnowledgeDocked 更新]
+  C --> D[ChatSidebar 接收 docked prop]
+  D --> E[aside.chat-sidebar 增加或移除 docked class]
+  C --> F[chat-screen 增加或移除 typing class]
+  E --> G[侧栏宽高过渡到 0, 内容透明且禁用 pointer-events]
+  F --> H[chat-main margin-left 收回到页面边距]
+  F --> I[chat-input-area 左内边距调整]
+```
+
+会触发收缩的场景：
+
+- 输入框获得焦点时，`ChatInput.syncActive(true)` 发出 `active-change=true`。
+- 输入框已有非空内容并继续输入时，`handleInput()` 保持 `active-change=true`。
+- 发送消息后，`send()` 清空输入框，但仍调用 `syncActive(true)`，侧栏保持收缩，让对话区域继续占用更多宽度。
+
+会触发展开的场景：
+
+- 输入框左侧的 dock 圆点按钮调用 `ui.setChatKnowledgeDocked(false)`。
+- `@` 提及选择知识库后，如果输入框内容为空，`applyMentionSelection()` 会发出 `active-change=false`。
+
+当前不是触发源的条件：
+
+- 窗口宽度变化不会主动触发 Chat 侧栏收缩；当前没有针对 `.chat-sidebar` 的 media query 收缩逻辑。
+- 切换 `聊天记录 / 知识库` Tab 不会触发收缩。
+- 选择知识库、删除会话、刷新会话列表不会触发收缩。
+- 切换 Build / Chat / Query 页面不会直接改写 `isChatKnowledgeDocked`。
+
+异常触发风险：
+
+- 仅聚焦输入框也会收缩侧栏，即使用户没有开始输入。
+- 输入框没有 `blur` 恢复逻辑；失焦后侧栏可能继续保持收缩。
+- `send()` 在清空输入后仍保持 active 状态，发送完成后侧栏不会自动展开。
+- `ChatSidebar` 声明了 `expand` 事件，但模板中没有触发点；实际展开入口在 `ChatInput` 的 dock 圆点按钮。
+
 ### Replay
 
 - Replay 以播放器式 modal 展示。

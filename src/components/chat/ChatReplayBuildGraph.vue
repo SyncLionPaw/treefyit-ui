@@ -9,12 +9,18 @@ const props = defineProps<{
   trees: TreeNode[]
   activeNodeId?: string
   activePathIds: Set<string>
+  scopeNodeIds: Set<string>
+  pulseKey?: string
 }>()
 
 const graphContainer = ref<HTMLDivElement | null>(null)
 let graph: G6Graph | null = null
 let graphLoading = false
 let hasFitGraph = false
+let graphRenderQueue = Promise.resolve()
+let graphRendering = false
+let graphPendingDestroy = false
+let isDisposed = false
 
 const viewportAnimation = { duration: 320, easing: 'ease-out' }
 const REPLAY_FULL_RENDER_LIMIT = 650
@@ -96,6 +102,10 @@ function collectReplayVisibleIds(trees: TreeNode[]) {
   items.filter(item => item.depth <= 1).forEach(item => add(item.id))
   props.activePathIds.forEach(id => addAncestors(id))
   addAncestors(props.activeNodeId)
+  props.scopeNodeIds.forEach(id => {
+    addAncestors(id)
+    add(id)
+  })
   ;(childrenMap.get(props.activeNodeId || '') || []).forEach(add)
   const activeParentId = props.activeNodeId ? itemMap.get(props.activeNodeId)?.parentId : undefined
   ;(childrenMap.get(activeParentId || '') || []).forEach(add)
@@ -133,6 +143,7 @@ function collectGraphData(trees: TreeNode[]) {
         treeY: y,
         isActive: id === props.activeNodeId,
         isAncestor: props.activePathIds.has(id) && id !== props.activeNodeId,
+        isInScope: props.scopeNodeIds.has(id) && id !== props.activeNodeId,
       },
       style: { x: anchoredX, y },
     })
@@ -162,10 +173,10 @@ const hasActiveGraphNode = computed(() => Boolean(
 ))
 
 async function createGraph() {
-  if (!graphContainer.value || graph || graphLoading) return
+  if (isDisposed || !graphContainer.value || graph || graphLoading) return
   graphLoading = true
   const { Graph } = await import('@antv/g6')
-  if (!graphContainer.value) {
+  if (isDisposed || !graphContainer.value) {
     graphLoading = false
     return
   }
@@ -180,31 +191,40 @@ async function createGraph() {
         const depth = Number(datum.data?.depth || 0)
         const isActive = Boolean(datum.data?.isActive)
         const isAncestor = Boolean(datum.data?.isAncestor)
+        const isInScope = Boolean(datum.data?.isInScope)
         const size = Math.max(7, Math.round((26 - depth * 3) * graphSettings.value.nodeScale))
 
         return {
           x: Number(datum.data?.treeX || 0),
           y: Number(datum.data?.treeY || 0),
-          size,
+          size: isActive ? size + 9 : isInScope ? size + 4 : size,
           fill: isActive
             ? '#F59E0B'
+            : isInScope
+              ? 'rgba(22, 163, 74, 0.24)'
             : isAncestor
               ? 'rgba(245, 158, 11, 0.16)'
               : 'rgba(255, 255, 255, 0.92)',
           stroke: isActive
-            ? '#FDE68A'
+            ? '#B45309'
+            : isInScope
+              ? 'rgba(22, 163, 74, 0.72)'
             : isAncestor
               ? 'rgba(245, 158, 11, 0.52)'
               : 'rgba(82, 100, 91, 0.56)',
-          lineWidth: 2,
-          labelText: isActive ? String(datum.data?.title || '') : '',
+          lineWidth: isActive ? 4 : isInScope ? 2.5 : 2,
+          labelText: isActive || isInScope ? String(datum.data?.title || '') : '',
           labelFill: isActive ? '#B45309' : '#18181B',
-          labelFontSize: 10,
+          labelFontSize: isActive ? 12 : 10,
           labelFontWeight: isActive ? 800 : 700,
           labelPlacement: 'bottom',
-          labelMaxWidth: 96,
-          shadowColor: isActive ? 'rgba(245, 158, 11, 0.24)' : 'rgba(18, 51, 32, 0.16)',
-          shadowBlur: isActive ? 14 : 7,
+          labelMaxWidth: isActive ? 132 : 96,
+          shadowColor: isActive
+            ? 'rgba(245, 158, 11, 0.62)'
+            : isInScope
+              ? 'rgba(22, 163, 74, 0.28)'
+              : 'rgba(18, 51, 32, 0.16)',
+          shadowBlur: isActive ? 28 : isInScope ? 16 : 7,
         }
       },
     },
@@ -212,11 +232,18 @@ async function createGraph() {
       style: (datum: { source?: string; target?: string }) => {
         const sourceActive = datum.source ? props.activePathIds.has(String(datum.source)) : false
         const targetActive = datum.target ? props.activePathIds.has(String(datum.target)) : false
+        const sourceInScope = datum.source ? props.scopeNodeIds.has(String(datum.source)) : false
+        const targetInScope = datum.target ? props.scopeNodeIds.has(String(datum.target)) : false
         const active = sourceActive && targetActive
+        const inScope = sourceInScope && targetInScope
 
         return {
-          stroke: active ? 'rgba(245, 158, 11, 0.5)' : 'rgba(216, 228, 220, 0.82)',
-          lineWidth: active ? 1.7 : 1.2,
+          stroke: active
+            ? 'rgba(245, 158, 11, 0.68)'
+            : inScope
+              ? 'rgba(22, 163, 74, 0.42)'
+              : 'rgba(216, 228, 220, 0.82)',
+          lineWidth: active ? 2.4 : inScope ? 1.8 : 1.2,
         }
       },
     },
@@ -230,24 +257,58 @@ async function createGraph() {
   graphLoading = false
 }
 
-function renderGraph() {
-  void nextTick(async () => {
-    if (!graphData.value.nodes.length) return
-    await createGraph()
-    const shouldFit = !hasFitGraph
-    graph?.setData(graphData.value as never)
-    await graph?.render()
-    if (shouldFit) {
-      await graph?.fitView(undefined, viewportAnimation)
-      hasFitGraph = true
-    }
-    if (hasActiveGraphNode.value && props.activeNodeId) {
-      await graph?.focusElement(props.activeNodeId, viewportAnimation)
-    }
-  })
+function isGraphDestroyed(target: G6Graph | null) {
+  return Boolean((target as unknown as { destroyed?: boolean } | null)?.destroyed)
 }
 
-watch(() => [props.trees, props.activeNodeId, [...props.activePathIds].join('|')], () => {
+function destroyGraph() {
+  if (!graph) return
+  if (graphRendering) {
+    graphPendingDestroy = true
+    return
+  }
+  graph.destroy()
+  graph = null
+  graphLoading = false
+  hasFitGraph = false
+}
+
+function renderGraph() {
+  graphRenderQueue = graphRenderQueue
+    .catch(() => undefined)
+    .then(renderGraphNow)
+}
+
+async function renderGraphNow() {
+  await nextTick()
+  if (isDisposed || !graphContainer.value || !graphData.value.nodes.length) return
+  try {
+    await createGraph()
+    if (isDisposed || !graphContainer.value || !graph) return
+    const shouldFit = !hasFitGraph
+    const currentGraph = graph
+    graphRendering = true
+    currentGraph.setData(graphData.value as never)
+    await currentGraph.render()
+    if (!isDisposed && graph === currentGraph && !isGraphDestroyed(currentGraph) && shouldFit) {
+      await currentGraph.fitView(undefined, viewportAnimation)
+      hasFitGraph = true
+    }
+    if (!isDisposed && graph === currentGraph && !isGraphDestroyed(currentGraph) && hasActiveGraphNode.value && props.activeNodeId) {
+      await currentGraph.focusElement(props.activeNodeId, viewportAnimation)
+    }
+  } catch (error) {
+    if (!isDisposed) console.error(error)
+  } finally {
+    graphRendering = false
+    if (graphPendingDestroy || isDisposed) {
+      graphPendingDestroy = false
+      destroyGraph()
+    }
+  }
+}
+
+watch(() => [props.trees, props.activeNodeId, [...props.activePathIds].join('|'), [...props.scopeNodeIds].join('|'), props.pulseKey], () => {
   renderGraph()
 }, { deep: true, immediate: true })
 
@@ -256,13 +317,13 @@ watch(() => props.trees, () => {
 }, { deep: true })
 
 onBeforeUnmount(() => {
-  graph?.destroy()
-  graph = null
+  isDisposed = true
+  destroyGraph()
 })
 </script>
 
 <template>
-  <div ref="graphContainer" class="replay-build-graph"></div>
+  <div ref="graphContainer" class="replay-build-graph" :class="{ pulsing: Boolean(pulseKey) }"></div>
 </template>
 
 <style lang="scss" scoped>
@@ -280,10 +341,28 @@ onBeforeUnmount(() => {
     linear-gradient(180deg, rgba(236, 241, 238, 0.96), rgba(224, 231, 226, 0.88));
 }
 
+.replay-build-graph.pulsing {
+  animation: replayGraphPulse 950ms ease-out;
+}
+
 :global(.theme-dark) .replay-build-graph {
   border-color: #2a2a2a;
   background:
     radial-gradient(circle at 50% 0%, rgba(22, 163, 74, 0.12), transparent 34%),
     rgba(10, 10, 15, 0.34);
+}
+
+@keyframes replayGraphPulse {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba($color-primary, 0.28), 0 0 0 0 rgba($color-primary, 0.18);
+  }
+
+  45% {
+    box-shadow: inset 0 0 0 2px rgba($color-primary, 0.42), 0 0 0 8px rgba($color-primary, 0.08);
+  }
+
+  100% {
+    box-shadow: inset 0 0 0 0 rgba($color-primary, 0), 0 0 0 0 rgba($color-primary, 0);
+  }
 }
 </style>

@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { ChatMessage, ChatToolEvent } from '../types'
-import { resolveApiUrl } from '../services/apiClient'
+import { resolveApiUrl, resolveStreamingApiUrl } from '../services/apiClient'
+import { mergeStreamingText } from '../utils/streamText'
 import { useApiConfigStore } from './apiConfigStore'
 import { useTreeStore } from './treeStore'
 
@@ -10,13 +11,14 @@ type ChatStreamEvent =
   | { type: 'text' | 'reasoning'; text?: string }
   | { type: 'tool_call'; id?: string; name?: string; arguments?: unknown }
   | { type: 'tool_result'; id?: string; name?: string; ok?: boolean; content?: unknown }
+  | { type: 'turn_end'; turn?: number; stopped?: boolean }
   | { type: 'done'; answer?: string; turns?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; session_id?: string }
   | { type: 'error'; message?: string }
   | { type: 'debug'; event?: string }
 
 export interface ChatSessionSummary {
   id: string
-  bid: string
+  bid: string | null
   title: string
   turn_count: number
   created_at: string
@@ -31,6 +33,16 @@ interface ChatSessionTurn {
   content?: string | null
   tool_calls?: string | Array<{ id?: string; name?: string; arguments?: unknown }> | null
   tool_results?: string | Array<{ id?: string; name?: string; ok?: boolean; content?: unknown }> | null
+  assistant_events?: string | Array<{
+    seq?: number
+    type?: 'text' | 'reasoning' | 'tool_call' | 'tool_result'
+    text?: string
+    id?: string
+    name?: string
+    arguments?: unknown
+    ok?: boolean
+    content?: unknown
+  }> | null
   created_at: string
 }
 
@@ -46,6 +58,17 @@ function formatChatError(err: unknown, baseUrl: string) {
     return `Chat 失败：无法连接 API 服务。请确认后端已启动，地址为 ${baseUrl}，并且已支持 POST /api/chat。`
   }
   return `Chat 失败：${rawMessage || '未知错误'}`
+}
+
+function isAbortLikeError(err: unknown) {
+  if (!(err instanceof Error)) return false
+  const message = err.message || ''
+  return (
+    err.name === 'AbortError' ||
+    /abort/i.test(message) ||
+    message === 'Load failed' ||
+    message === 'Failed to fetch'
+  )
 }
 
 function toolEventId(event: { id?: string; name?: string }) {
@@ -83,7 +106,7 @@ function normalizeSession(session: BackendChatSessionSummary): ChatSessionSummar
   const id = session.id || session.session_id || ''
   return {
     id,
-    bid: session.bid || session.tree_id || '',
+    bid: session.bid || session.tree_id || null,
     title: session.title || 'Untitled chat',
     turn_count: session.turn_count || session.turns?.length || 0,
     created_at: session.created_at || '',
@@ -117,20 +140,26 @@ function withQuery(url: string, params: Record<string, string | number | undefin
   return queryString ? `${url}?${queryString}` : url
 }
 
-function ensureTextPart(message: ChatMessage) {
+function ensureMessagePart(message: ChatMessage, type: 'text' | 'reasoning') {
   if (!message.parts) {
-    message.parts = [{ id: `${message.id}-text-0`, type: 'text', content: message.content }]
+    message.parts = [{ id: `${message.id}-${type}-0`, type, content: message.content }]
   }
   const lastPart = message.parts[message.parts.length - 1]
-  if (lastPart?.type === 'text') return lastPart
-  const nextPart = { id: `${message.id}-text-${message.parts.length}`, type: 'text' as const, content: '' }
+  if (lastPart?.type === type) return lastPart
+  const nextPart = { id: `${message.id}-${type}-${message.parts.length}`, type, content: '' }
   message.parts.push(nextPart)
   return nextPart
 }
 
 function setMessageText(message: ChatMessage, content: string) {
   message.content = content
-  ensureTextPart(message).content = content
+  ensureMessagePart(message, 'text').content = content
+}
+
+function appendMessagePartText(message: ChatMessage, type: 'text' | 'reasoning', patch: string) {
+  if (!patch) return
+  const part = ensureMessagePart(message, type)
+  part.content = mergeStreamingText(part.content, patch)
 }
 
 function findToolEvent(message: ChatMessage, id: string, name?: string) {
@@ -144,6 +173,7 @@ function findToolPart(message: ChatMessage, tool: ChatToolEvent) {
 }
 
 export const useChatStore = defineStore('chat', () => {
+  const tree = useTreeStore()
   const messages = ref<ChatMessage[]>([])
   const inputText = ref('')
   const isSending = ref(false)
@@ -154,6 +184,12 @@ export const useChatStore = defineStore('chat', () => {
   const sessionsError = ref<string | null>(null)
   const turnsLoading = ref(false)
   const selectedSessionId = ref<string | null>(null)
+  const selectedKnowledgeBaseId = ref<string | null>(null)
+
+  const selectedKnowledgeBase = computed(() => {
+    if (!selectedKnowledgeBaseId.value) return null
+    return tree.knowledgeBases.find(kb => kb.id === selectedKnowledgeBaseId.value) || null
+  })
 
   const sessionsGuard = computed(() => {
     if (sessionsLoading.value) {
@@ -163,7 +199,7 @@ export const useChatStore = defineStore('chat', () => {
       return { status: 'error' as const, title: '聊天记录加载失败', description: sessionsError.value }
     }
     if (!sessions.value.length) {
-      return { status: 'empty' as const, title: '暂无聊天记录', description: '当前知识库还没有对话记录。' }
+      return { status: 'empty' as const, title: '暂无聊天记录', description: '这里展示后端保存的全部对话会话。' }
     }
     return { status: 'ready' as const, title: '聊天记录已就绪', description: `${sessions.value.length} 个对话` }
   })
@@ -184,9 +220,18 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     if (event.type === 'text' && event.text) {
+      const textPatch = event.text
       updateMessage(messageId, message => {
-        message.content += event.text
-        ensureTextPart(message).content += event.text
+        message.content = mergeStreamingText(message.content, textPatch)
+        appendMessagePartText(message, 'text', textPatch)
+      })
+      return
+    }
+
+    if (event.type === 'reasoning' && event.text) {
+      const reasoningPatch = event.text
+      updateMessage(messageId, message => {
+        appendMessagePartText(message, 'reasoning', reasoningPatch)
       })
       return
     }
@@ -196,7 +241,7 @@ export const useChatStore = defineStore('chat', () => {
       updateMessage(messageId, message => {
         if (!message.content.trim()) {
           message.content = event.answer || ''
-          ensureTextPart(message).content = event.answer || ''
+          ensureMessagePart(message, 'text').content = event.answer || ''
         }
       })
       return
@@ -222,7 +267,6 @@ export const useChatStore = defineStore('chat', () => {
           toolEvents.push(toolEvent)
           message.parts ||= []
           message.parts.push({ id: `${message.id}-tool-${id}`, type: 'tool', toolEvent })
-          message.parts.push({ id: `${message.id}-text-${message.parts.length}`, type: 'text', content: '' })
         }
         message.toolEvents = toolEvents
       })
@@ -253,10 +297,13 @@ export const useChatStore = defineStore('chat', () => {
           toolEvents.push(toolEvent)
           message.parts ||= []
           message.parts.push({ id: `${message.id}-tool-${id}`, type: 'tool', toolEvent })
-          message.parts.push({ id: `${message.id}-text-${message.parts.length}`, type: 'text', content: '' })
         }
         message.toolEvents = toolEvents
       })
+      return
+    }
+
+    if (event.type === 'turn_end') {
       return
     }
 
@@ -305,11 +352,10 @@ export const useChatStore = defineStore('chat', () => {
     if (!text || isSending.value) return
 
     const apiConfig = useApiConfigStore()
-    const tree = useTreeStore()
-    const currentBuild = tree.currentBuild
-    const hasSelectedBuild = Boolean(currentBuild?.id)
-    const sessionId = hasSelectedBuild
-      ? (currentSessionBid.value === currentBuild?.id ? currentSessionId.value : null)
+    const currentKnowledgeBase = selectedKnowledgeBase.value
+    const selectedBid = currentKnowledgeBase?.id || null
+    const sessionId = selectedBid
+      ? (currentSessionBid.value === selectedBid ? currentSessionId.value : null)
       : (currentSessionBid.value ? null : currentSessionId.value)
 
     messages.value.push({
@@ -324,7 +370,8 @@ export const useChatStore = defineStore('chat', () => {
       role: 'ai',
       content: '',
       timestamp: new Date().toISOString(),
-      sourceRef: currentBuild?.filename,
+      isStreaming: true,
+      sourceRef: currentKnowledgeBase?.name,
       parts: [{ id: `${Date.now() + 1}-text-0`, type: 'text', content: '' }],
     }
     messages.value.push(aiMessage)
@@ -332,10 +379,10 @@ export const useChatStore = defineStore('chat', () => {
     isSending.value = true
     try {
       const payload: Record<string, string> = { question: text }
-      if (currentBuild?.id) payload.bid = currentBuild.id
+      if (selectedBid) payload.bid = selectedBid
       if (sessionId) payload.session_id = sessionId
 
-      const response = await fetch(resolveApiUrl(apiConfig, 'chatTree'), {
+      const response = await fetch(resolveStreamingApiUrl(apiConfig, 'chatTree'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -355,16 +402,34 @@ export const useChatStore = defineStore('chat', () => {
         }
       })
     } catch (err) {
+      if (isAbortLikeError(err)) {
+        updateMessage(aiMessage.id, message => {
+          if (!message.content.trim()) {
+            const fallback = message.toolEvents?.length
+              ? '本次响应在预览环境中被中断，已保留已收到的工具结果。'
+              : aiMessage.content.trim()
+                ? '本次响应在预览环境中被中断，已保留已收到的内容。'
+                : '本次请求被浏览器或预览环境中断。后端接口可用，请直接重试。'
+            setMessageText(message, fallback)
+          }
+          message.isStreaming = false
+        })
+        return
+      }
       updateMessage(aiMessage.id, message => {
         message.role = 'system'
+        message.isStreaming = false
         message.toolEvents = undefined
-        message.parts = [{ id: `${message.id}-text-error`, type: 'text', content: formatChatError(err, apiConfig.displayBaseUrl) }]
-        message.content = formatChatError(err, apiConfig.displayBaseUrl)
+        message.parts = [{ id: `${message.id}-text-error`, type: 'text', content: formatChatError(err, apiConfig.displayStreamBaseUrl) }]
+        message.content = formatChatError(err, apiConfig.displayStreamBaseUrl)
         message.sourceRef = undefined
       })
     } finally {
+      updateMessage(aiMessage.id, message => {
+        message.isStreaming = false
+      })
       isSending.value = false
-      void loadSessions({ bid: currentBuild?.id, limit: 50 })
+      void loadSessions({ limit: 50 })
     }
   }
 
@@ -382,6 +447,16 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     if (role === 'ai') {
+      const assistantEvents = parseJsonList<{
+        seq?: number
+        type?: 'text' | 'reasoning' | 'tool_call' | 'tool_result'
+        text?: string
+        id?: string
+        name?: string
+        arguments?: unknown
+        ok?: boolean
+        content?: unknown
+      }>(turn.assistant_events)
       const toolCalls = parseJsonList<{ id?: string; name?: string; arguments?: unknown }>(turn.tool_calls)
       const toolResults = parseJsonList<{ id?: string; name?: string; ok?: boolean; content?: unknown }>(turn.tool_results)
       const toolEvents = toolCalls.map((call, index) => {
@@ -396,10 +471,52 @@ export const useChatStore = defineStore('chat', () => {
         }
       })
       message.toolEvents = toolEvents
-      message.parts = [
-        ...toolEvents.map(toolEvent => ({ id: `${message.id}-tool-${toolEvent.id}`, type: 'tool' as const, toolEvent })),
-        { id: `${message.id}-text-0`, type: 'text' as const, content },
-      ]
+      if (assistantEvents.length) {
+        message.parts = []
+        for (const [index, event] of assistantEvents.entries()) {
+          if ((event.type === 'text' || event.type === 'reasoning') && event.text) {
+            const lastPart = message.parts[message.parts.length - 1]
+            if (lastPart?.type === event.type) {
+              lastPart.content = mergeStreamingText(lastPart.content, event.text)
+            } else {
+              message.parts.push({
+                id: `${message.id}-${event.type}-${event.seq ?? index}`,
+                type: event.type,
+                content: event.text,
+              })
+            }
+            continue
+          }
+
+          if (event.type === 'tool_call' || event.type === 'tool_result') {
+            const toolId = event.id || event.name || `tool-${index}`
+            const toolEvent = toolEvents.find(item => item.id === toolId || item.name === event.name)
+            if (toolEvent) {
+              const existingPart = message.parts.find(part => (
+                part.type === 'tool' && (part.toolEvent.id === toolEvent.id || part.toolEvent.name === toolEvent.name)
+              ))
+              if (!existingPart) {
+                message.parts.push({
+                  id: `${message.id}-tool-${toolEvent.id}-${event.seq ?? index}`,
+                  type: 'tool',
+                  toolEvent,
+                })
+              }
+            }
+          }
+        }
+        if (!message.parts.some(part => part.type === 'text' && part.content.trim()) && content.trim()) {
+          message.parts.push({ id: `${message.id}-text-fallback`, type: 'text', content })
+        }
+      } else {
+        message.parts = []
+        for (const toolEvent of toolEvents) {
+          message.parts.push({ id: `${message.id}-tool-${toolEvent.id}`, type: 'tool' as const, toolEvent })
+        }
+        if (content.trim()) {
+          message.parts.push({ id: `${message.id}-text-0`, type: 'text' as const, content })
+        }
+      }
     } else {
       message.parts = [{ id: `${message.id}-text-0`, type: 'text', content }]
     }
@@ -413,7 +530,6 @@ export const useChatStore = defineStore('chat', () => {
     sessionsError.value = null
     try {
       const response = await fetch(withQuery(resolveApiUrl(apiConfig, 'listChatSessions'), {
-        bid: options.bid,
         limit: options.limit || 50,
       }))
       if (!response.ok) throw new Error(`Sessions request failed: ${response.status}`)
@@ -441,6 +557,7 @@ export const useChatStore = defineStore('chat', () => {
       selectedSessionId.value = session.id
       currentSessionId.value = session.id
       currentSessionBid.value = session.bid
+      selectedKnowledgeBaseId.value = session.bid
     } catch (err) {
       sessionsError.value = formatSessionError(err, '加载对话消息', apiConfig.displayBaseUrl)
     } finally {
@@ -468,6 +585,15 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function selectKnowledgeBase(id: string | null) {
+    selectedKnowledgeBaseId.value = id
+    selectedSessionId.value = null
+  }
+
+  function clearKnowledgeBase() {
+    selectedKnowledgeBaseId.value = null
+  }
+
   return {
     messages,
     inputText,
@@ -479,9 +605,13 @@ export const useChatStore = defineStore('chat', () => {
     sessionsGuard,
     turnsLoading,
     selectedSessionId,
+    selectedKnowledgeBaseId,
+    selectedKnowledgeBase,
     sendMessage,
     loadSessions,
     loadSessionTurns,
     deleteSession,
+    selectKnowledgeBase,
+    clearKnowledgeBase,
   }
 })

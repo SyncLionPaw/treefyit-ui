@@ -584,6 +584,15 @@ watch(activeDocKey, () => {
     border-collapse: collapse;
   }
 
+  :deep(img) {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    max-height: 70vh;
+    object-fit: contain;
+    border-radius: $radius-control;
+  }
+
   :deep(th),
   :deep(td) {
     padding: 7px 9px;

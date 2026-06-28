@@ -9,16 +9,24 @@ import {
 } from 'lucide-vue-next'
 import { useChatStore } from '../../stores/chatStore'
 import { useTreeStore } from '../../stores/treeStore'
+import { formatUiDateTime } from '../../utils/dateTime'
 
 const tree = useTreeStore()
 const chat = useChatStore()
 const activeTab = ref<'knowledge' | 'history'>('knowledge')
 const historyListEl = ref<HTMLElement | null>(null)
+const deletingKnowledgeBaseId = ref<string | null>(null)
 
 const sessionRows = computed(() => chat.sessions.map(session => ({
   ...session,
   title: compactText(session.title || 'Untitled chat'),
-  time: formatSessionTime(session.updated_at || session.created_at),
+  time: formatUiDateTime(session.updated_at || session.created_at, { preset: 'monthDayTime' }),
+  timeTitle: formatUiDateTime(session.updated_at || session.created_at, { preset: 'detail' }),
+})))
+const knowledgeBaseRows = computed(() => tree.knowledgeBases.map(kb => ({
+  ...kb,
+  updatedAtLabel: formatUiDateTime(kb.updatedAt, { preset: 'monthDayTime' }),
+  updatedAtTitle: formatUiDateTime(kb.updatedAt, { preset: 'detail' }),
 })))
 
 function compactText(text: string, maxLength = 92) {
@@ -26,19 +34,8 @@ function compactText(text: string, maxLength = 92) {
   return compacted.length > maxLength ? `${compacted.slice(0, maxLength)}...` : compacted
 }
 
-function formatSessionTime(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value || '--'
-  return date.toLocaleString([], {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
 function refreshSessions() {
-  void chat.loadSessions({ bid: tree.currentBuild?.id, limit: 50 })
+  void chat.loadSessions({ limit: 50 })
 }
 
 function openSession(session: typeof chat.sessions[number]) {
@@ -47,6 +44,23 @@ function openSession(session: typeof chat.sessions[number]) {
 
 function removeSession(sessionId: string) {
   void chat.deleteSession(sessionId)
+}
+
+function selectKnowledgeBase(id: string | null) {
+  chat.selectKnowledgeBase(id)
+}
+
+async function removeKnowledgeBase(kb: typeof knowledgeBaseRows.value[number]) {
+  if (deletingKnowledgeBaseId.value) return
+  const confirmed = window.confirm(`删除知识库「${kb.name}」？这个操作会删除对应的 Tree、构建记录、索引和原始文件。`)
+  if (!confirmed) return
+
+  deletingKnowledgeBaseId.value = kb.id
+  const deleted = await tree.deleteKnowledgeBase(kb.id)
+  if (deleted && chat.selectedKnowledgeBaseId === kb.id) {
+    chat.clearKnowledgeBase()
+  }
+  deletingKnowledgeBaseId.value = null
 }
 
 const historyScrollSignature = computed(() => sessionRows.value.map(record => `${record.id}:${record.title}:${record.time}`).join('|'))
@@ -82,52 +96,80 @@ defineEmits<{
         <button
           type="button"
           role="tab"
-          :aria-selected="activeTab === 'knowledge'"
-          :class="{ active: activeTab === 'knowledge' }"
-          @click="activeTab = 'knowledge'"
-        >
-          知识库
-        </button>
-        <button
-          type="button"
-          role="tab"
           :aria-selected="activeTab === 'history'"
           :class="{ active: activeTab === 'history' }"
           @click="activeTab = 'history'"
         >
           聊天记录
         </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === 'knowledge'"
+          :class="{ active: activeTab === 'knowledge' }"
+          @click="activeTab = 'knowledge'"
+        >
+          知识库
+        </button>
       </div>
     </div>
 
     <template v-if="activeTab === 'knowledge'">
-      <div class="kb-current">
+      <div v-if="chat.selectedKnowledgeBase" class="kb-current">
         <span class="current-kicker">当前知识库</span>
-        <strong>{{ tree.activeBuildTitle }}</strong>
-        <p>{{ tree.activeBuildDescription }}</p>
+        <strong>{{ chat.selectedKnowledgeBase.name }}</strong>
+        <p>{{ chat.selectedKnowledgeBase.description }}</p>
         <div class="current-meta">
-          <span>{{ tree.hasActiveBuild ? 1 : 0 }} docs</span>
-          <span>{{ tree.activeBuildNodeCount }} nodes</span>
+          <span>1 docs</span>
+          <span>{{ chat.selectedKnowledgeBase.nodeCount }} nodes</span>
         </div>
       </div>
 
       <div class="kb-list" aria-label="切换知识库">
         <button
-          v-for="kb in tree.knowledgeBases"
-          :key="kb.id"
-          class="kb-item"
-          :class="{ active: tree.activeKnowledgeBaseId === kb.id }"
-          @click="tree.setActiveKnowledgeBase(kb.id)"
+          class="kb-item kb-item-clear"
+          :class="{ active: !chat.selectedKnowledgeBaseId }"
+          @click="selectKnowledgeBase(null)"
         >
           <span class="kb-icon">
             <Layers3 :size="14" :stroke-width="2" aria-hidden="true" />
           </span>
           <span class="kb-info">
-            <strong>{{ kb.name }}</strong>
-            <small>{{ kb.updatedAt }} · {{ kb.documentCount }} docs</small>
+            <strong>直接对话</strong>
+            <small>不附带知识库，按通用问答处理</small>
           </span>
-          <Check v-if="tree.activeKnowledgeBaseId === kb.id" class="kb-check" :size="14" :stroke-width="2.2" aria-hidden="true" />
+          <Check v-if="!chat.selectedKnowledgeBaseId" class="kb-check" :size="14" :stroke-width="2.2" aria-hidden="true" />
         </button>
+        <div
+          v-for="kb in knowledgeBaseRows"
+          :key="kb.id"
+          class="kb-row"
+        >
+          <button
+            class="kb-item kb-item-main"
+            :class="{ active: chat.selectedKnowledgeBaseId === kb.id }"
+            @click="selectKnowledgeBase(kb.id)"
+          >
+            <span class="kb-icon">
+              <Layers3 :size="14" :stroke-width="2" aria-hidden="true" />
+            </span>
+            <span class="kb-info">
+              <strong>{{ kb.name }}</strong>
+              <small :title="kb.updatedAtTitle">{{ kb.updatedAtLabel }} · {{ kb.documentCount }} docs</small>
+            </span>
+            <Check v-if="chat.selectedKnowledgeBaseId === kb.id" class="kb-check" :size="14" :stroke-width="2.2" aria-hidden="true" />
+          </button>
+          <button
+            class="history-delete kb-delete"
+            type="button"
+            :disabled="deletingKnowledgeBaseId === kb.id"
+            :aria-label="`删除知识库 ${kb.name}`"
+            :title="`删除 ${kb.name}`"
+            @click.stop="removeKnowledgeBase(kb)"
+          >
+            <Trash2 :size="12" :stroke-width="2.2" aria-hidden="true" />
+          </button>
+        </div>
         <p v-if="tree.historyGuard.status !== 'ready'" class="kb-empty">
           <strong>{{ tree.historyGuard.title }}</strong>
           <span>{{ tree.historyGuard.description }}</span>
@@ -158,7 +200,7 @@ defineEmits<{
           <span class="history-dot">{{ record.turn_count }}</span>
           <span>{{ record.title || 'Untitled chat' }}</span>
         </p>
-        <small>{{ record.time }}</small>
+        <small :title="record.timeTitle">{{ record.time }}</small>
         <button class="history-delete" type="button" aria-label="删除对话" @click.stop="removeSession(record.id)">
           <Trash2 :size="12" :stroke-width="2.2" aria-hidden="true" />
         </button>
@@ -378,7 +420,8 @@ defineEmits<{
 }
 
 .history-refresh,
-.history-delete {
+.history-delete,
+.kb-delete {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -398,6 +441,10 @@ defineEmits<{
     cursor: wait;
     opacity: 0.62;
   }
+}
+
+.kb-delete {
+  padding: 0;
 }
 
 .history-refresh {
@@ -495,6 +542,10 @@ defineEmits<{
   flex-shrink: 0;
 }
 
+.kb-row {
+  position: relative;
+}
+
 .kb-item {
   display: flex;
   align-items: center;
@@ -519,6 +570,11 @@ defineEmits<{
     border-color: rgba($color-primary, 0.38);
     background: $color-accent;
   }
+}
+
+.kb-item-main {
+  min-width: 0;
+  padding-right: 34px;
 }
 
 .kb-empty {

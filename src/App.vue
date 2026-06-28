@@ -80,10 +80,13 @@ onMounted(() => {
 .theme-dark :deep(.docs-content),
 .theme-dark :deep(.control-card),
 .theme-dark :deep(.build-progress-card),
+.theme-dark :deep(.build-task-row),
+.theme-dark :deep(.build-trace-panel),
 .theme-dark :deep(.history-card),
 .theme-dark :deep(.dropzone),
 .theme-dark :deep(.history-item),
 .theme-dark :deep(.history-summary),
+.theme-dark :deep(.history-delete),
 .theme-dark :deep(.kb-empty),
 .theme-dark :deep(.meta-card),
 .theme-dark :deep(.json-view),
@@ -93,6 +96,7 @@ onMounted(() => {
 .theme-dark :deep(.kb-current),
 .theme-dark :deep(.kb-item),
 .theme-dark :deep(.kb-icon),
+.theme-dark :deep(.kb-delete),
 .theme-dark :deep(.sidebar-tabs),
 .theme-dark :deep(.sidebar-note),
 .theme-dark :deep(.kb-pill),
@@ -223,6 +227,25 @@ onMounted(() => {
   color: #f4f4f5 !important;
 }
 
+.theme-dark :deep(.build-task-main strong) {
+  color: #f4f4f5 !important;
+}
+
+.theme-dark :deep(.build-trace-panel summary),
+.theme-dark :deep(.build-trace-main strong) {
+  color: #f4f4f5 !important;
+}
+
+.theme-dark :deep(.build-task-main small),
+.theme-dark :deep(.build-task-main em),
+.theme-dark :deep(.build-task-meta),
+.theme-dark :deep(.build-trace-panel summary small),
+.theme-dark :deep(.build-trace-row),
+.theme-dark :deep(.build-trace-main small),
+.theme-dark :deep(.build-trace-type) {
+  color: #a1a1aa !important;
+}
+
 .theme-dark :deep(.stage-dot) {
   filter: saturate(1.08);
 }
@@ -325,6 +348,34 @@ onMounted(() => {
   border-color: rgba(22, 163, 74, 0.55) !important;
   background: #1d1d1d !important;
   box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12) !important;
+}
+
+.theme-dark :deep(.query-select-trigger:hover:not(:disabled)),
+.theme-dark :deep(.query-select-trigger[aria-expanded='true']) {
+  border-color: rgba(22, 163, 74, 0.55) !important;
+  background: rgba(22, 163, 74, 0.12) !important;
+  color: #8de8ad !important;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12) !important;
+}
+
+.theme-dark :deep(.query-select-menu) {
+  border-color: rgba(22, 163, 74, 0.28) !important;
+  background: #181818 !important;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34) !important;
+}
+
+.theme-dark :deep(.query-select-option) {
+  color: #f4f4f5 !important;
+}
+
+.theme-dark :deep(.query-select-option.focused) {
+  background: rgba(22, 163, 74, 0.12) !important;
+  color: #8de8ad !important;
+}
+
+.theme-dark :deep(.query-select-option.active) {
+  background: rgba(22, 163, 74, 0.18) !important;
+  color: #8de8ad !important;
 }
 
 .theme-dark :deep(.message.user .bubble),
